@@ -83,9 +83,9 @@ fn eval_location_path<'a>(
         // Virtual document root — child axis returns depth-0 elements
         vec![XPathNode::Element(DOC_ROOT)]
     } else {
-        return Err(SimdXmlError::XPathEvalError(
-            "Relative paths require a context node".into(),
-        ));
+        // Relative path without explicit context: evaluate from document root
+        // (libxml2 uses the root element as default context for relative paths)
+        vec![XPathNode::Element(DOC_ROOT)]
     };
 
     for step in &path.steps {
@@ -136,7 +136,23 @@ fn eval_step<'a>(
         result.extend(matched);
     }
 
+    // XPath node sets are always unique, in document order.
+    // Deduplicate by node identity.
+    dedup_nodes(&mut result);
+
     Ok(result)
+}
+
+fn dedup_nodes(nodes: &mut Vec<XPathNode>) {
+    let mut seen = std::collections::HashSet::new();
+    nodes.retain(|n| {
+        let key = match n {
+            XPathNode::Element(idx) => (0, *idx),
+            XPathNode::Text(idx) => (1, *idx),
+            XPathNode::Attribute(idx, h) => (2, *idx),
+        };
+        seen.insert(key)
+    });
 }
 
 /// Apply a predicate to filter a node set.

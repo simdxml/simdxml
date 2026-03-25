@@ -24,8 +24,35 @@ pub fn parse_xpath(input: &str) -> Result<XPathExpr> {
 }
 
 fn xpath_expr(input: &str) -> IResult<&str, XPathExpr> {
-    // Support parenthesized filter: (expr)[pred]
-    alt((union_expr, location_path_expr))(input)
+    alt((parenthesized_filter, union_expr, location_path_expr))(input)
+}
+
+/// Parenthesized filter: (expr)[pred] — evaluate expr, then filter with pred
+fn parenthesized_filter(input: &str) -> IResult<&str, XPathExpr> {
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, inner) = xpath_expr(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+    let (input, preds) = predicates(input)?;
+
+    if preds.is_empty() {
+        // Just parenthesized, no filter
+        Ok((input, inner))
+    } else {
+        // Wrap in a FilterExpr (we'll reuse the LocationPath predicate mechanism)
+        // For now, convert to a path with predicates applied
+        match inner {
+            XPathExpr::LocationPath(mut path) => {
+                // Apply predicates to the last step
+                if let Some(last) = path.steps.last_mut() {
+                    last.predicates.extend(preds);
+                }
+                Ok((input, XPathExpr::LocationPath(path)))
+            }
+            _ => Ok((input, inner)), // Can't apply predicates to non-path
+        }
+    }
 }
 
 fn union_expr(input: &str) -> IResult<&str, XPathExpr> {
@@ -299,9 +326,10 @@ fn comparison_expr(input: &str) -> IResult<&str, XPathExpr> {
     let (input, left) = primary_expr(input)?;
     let (input, _) = multispace0(input)?;
 
+    // Try chaining binary operators
     if let Ok((rest, op)) = comparison_op(input) {
         let (rest, _) = multispace0(rest)?;
-        let (rest, right) = primary_expr(rest)?;
+        let (rest, right) = comparison_expr(rest)?; // Allow chaining
         Ok((
             rest,
             XPathExpr::BinaryOp(Box::new(left), op, Box::new(right)),
