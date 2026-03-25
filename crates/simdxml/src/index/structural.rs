@@ -213,7 +213,7 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                     }
                     let name_end = pos;
 
-                    // Skip attributes to find > or /> (SIMD-accelerated quote skipping)
+                    // Skip attributes to find > or />
                     let mut self_closing = false;
                     while pos < input.len() && input[pos] != b'>' {
                         if input[pos] == b'/' && pos + 1 < input.len() && input[pos + 1] == b'>' {
@@ -221,16 +221,13 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                             pos += 1;
                             break;
                         }
+                        // Skip quoted attribute values (memchr for closing quote)
                         if input[pos] == b'"' {
                             pos += 1;
-                            if let Some(off) = memchr(b'"', &input[pos..]) {
-                                pos += off;
-                            }
+                            if let Some(off) = memchr(b'"', &input[pos..]) { pos += off; }
                         } else if input[pos] == b'\'' {
                             pos += 1;
-                            if let Some(off) = memchr(b'\'', &input[pos..]) {
-                                pos += off;
-                            }
+                            if let Some(off) = memchr(b'\'', &input[pos..]) { pos += off; }
                         }
                         pos += 1;
                     }
