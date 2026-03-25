@@ -1149,6 +1149,15 @@ pub fn evaluate_from_context(
             Ok(context)
         }
         XPathExpr::LocationPath(_) => evaluate(index, expr),
+        XPathExpr::Union(exprs) => {
+            let mut result = Vec::new();
+            for e in exprs {
+                result.extend(evaluate_from_context(index, e, context_node)?);
+            }
+            dedup_nodes(&mut result);
+            sort_doc_order(index, &mut result);
+            Ok(result)
+        }
         _ => evaluate(index, expr),
     }
 }
