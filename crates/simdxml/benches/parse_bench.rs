@@ -28,10 +28,17 @@ fn bench_parse_throughput(c: &mut Criterion) {
         let mut group = c.benchmark_group(format!("parse/{}", label));
         group.throughput(Throughput::Bytes(data.len() as u64));
 
-        // simdxml (our parser)
+        // simdxml (memchr-based parser)
         group.bench_function("simdxml", |b| {
             b.iter(|| {
                 let _ = simdxml::parse(&data).unwrap();
+            });
+        });
+
+        // simdxml two-stage (NEON classifier + bitmask walker)
+        group.bench_function("simdxml_neon", |b| {
+            b.iter(|| {
+                let _ = simdxml::index::structural::parse_two_stage(&data).unwrap();
             });
         });
 
