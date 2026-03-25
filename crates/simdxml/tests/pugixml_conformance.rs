@@ -52,6 +52,12 @@ fn run_pugixml_tests() -> (usize, usize, Vec<String>) {
             Ok(idx) => idx,
             Err(_) => continue,
         };
+        // Find root element (first Open/SelfClose at depth 0)
+        let root_elem_idx = (0..index.tag_count())
+            .find(|&i| index.depths[i] == 0
+                && (index.tag_types[i] == simdxml::index::TagType::Open
+                    || index.tag_types[i] == simdxml::index::TagType::SelfClose))
+            .unwrap_or(0);
 
         for assertion in &block.assertions {
             let ctx = assertion.context.as_deref().unwrap_or("doc");
@@ -60,21 +66,19 @@ fn run_pugixml_tests() -> (usize, usize, Vec<String>) {
 
             match assertion.kind.as_str() {
                 "nodeset" => {
-                    // Test nodeset queries from first_child or doc context
-                    if ctx == "null" { continue; } // Skip null context (no document)
+                    if ctx == "null" { continue; }
 
                     total += 1;
-                    let xpath_str = if ctx == "first_child" {
-                        // Prepend /* to scope to root element's children
-                        // pugixml's "first_child" = doc.child("node"), our "/" selects doc root
-                        // We need to evaluate relative to the root element
-                        format!("/*/{}", &assertion.xpath)
-                    } else {
-                        assertion.xpath.clone()
-                    };
+                    let xpath_str = assertion.xpath.clone();
+                    let root_elem = root_elem_idx;
 
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        index.xpath(&xpath_str)
+                        if ctx == "first_child" {
+                            // Evaluate relative path from root element
+                            index.xpath_from(&xpath_str, root_elem)
+                        } else {
+                            index.xpath(&xpath_str)
+                        }
                     }));
 
                     match result {

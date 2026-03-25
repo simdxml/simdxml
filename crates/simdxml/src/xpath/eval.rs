@@ -221,10 +221,10 @@ fn eval_location_path<'a>(
     let mut context: Vec<XPathNode> = if path.absolute {
         vec![XPathNode::Element(DOC_ROOT)]
     } else {
-        let root_elem = (0..index.tag_count())
-            .find(|&i| index.depths[i] == 0 && index.tag_types[i] == TagType::Open)
-            .unwrap_or(0);
-        vec![XPathNode::Element(root_elem)]
+        // XPath 1.0 §2: initial context node is the root of the document tree.
+        // For relative paths at the top level, start from the document root node,
+        // not the document element. child::x from doc root finds the document element.
+        vec![XPathNode::Element(DOC_ROOT)]
     };
 
     // Fuse steps: look ahead for optimizable patterns
@@ -631,7 +631,7 @@ impl XPathValue {
     fn as_number(&self) -> f64 {
         match self {
             XPathValue::Number(n) => *n,
-            XPathValue::String(s) => s.parse().unwrap_or(f64::NAN),
+            XPathValue::String(s) => s.trim().parse().unwrap_or(f64::NAN),
             XPathValue::Boolean(b) => if *b { 1.0 } else { 0.0 },
         }
     }
@@ -931,12 +931,18 @@ fn eval_function(
             }
         }
         "boolean" => {
-            let val = if let Some(arg) = args.first() {
-                eval_predicate_value(index, node, arg, position, size)?
+            if let Some(arg) = args.first() {
+                // For LocationPath arguments, check node-set non-emptiness
+                if let XPathExpr::LocationPath(_) = arg {
+                    let nodes = evaluate_in_context(index, node, arg)?;
+                    Ok(XPathValue::Boolean(!nodes.is_empty()))
+                } else {
+                    let val = eval_predicate_value(index, node, arg, position, size)?;
+                    Ok(XPathValue::Boolean(val.is_truthy()))
+                }
             } else {
-                XPathValue::Boolean(false)
-            };
-            Ok(XPathValue::Boolean(val.is_truthy()))
+                Ok(XPathValue::Boolean(false))
+            }
         }
         "lang" => {
             // lang(string) — true if context node's xml:lang matches the argument.
@@ -1029,6 +1035,43 @@ fn node_string_value(index: &XmlIndex, node: XPathNode) -> String {
 }
 
 /// Evaluate an expression in the context of a specific node.
+/// Evaluate an expression from a specific context node (public API).
+pub fn evaluate_from_context(
+    index: &XmlIndex,
+    expr: &XPathExpr,
+    context_node: XPathNode,
+) -> Result<Vec<XPathNode>> {
+    match expr {
+        XPathExpr::LocationPath(path) if !path.absolute => {
+            let mut context = vec![context_node];
+            // Use the same step fusion as eval_location_path
+            let steps = &path.steps;
+            let mut i = 0;
+            while i < steps.len() {
+                if i + 1 < steps.len()
+                    && steps[i].axis == Axis::DescendantOrSelf
+                    && steps[i].node_test == NodeTest::Node
+                    && steps[i].predicates.is_empty()
+                    && steps[i + 1].axis == Axis::Child
+                {
+                    if steps[i + 1].predicates.is_empty() {
+                        context = eval_fused_descendant_child(index, &context, &steps[i + 1])?;
+                    } else {
+                        context = eval_fused_descendant_child_with_preds(index, &context, &steps[i + 1])?;
+                    }
+                    i += 2;
+                } else {
+                    context = eval_step(index, &context, &steps[i])?;
+                    i += 1;
+                }
+            }
+            Ok(context)
+        }
+        XPathExpr::LocationPath(_) => evaluate(index, expr),
+        _ => evaluate(index, expr),
+    }
+}
+
 fn evaluate_in_context(
     index: &XmlIndex,
     context_node: XPathNode,

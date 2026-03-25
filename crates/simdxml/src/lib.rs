@@ -71,4 +71,11 @@ impl<'a> XmlIndex<'a> {
         let expr = xpath::parse_xpath(xpath_expr)?;
         xpath::evaluate(self, &expr)
     }
+
+    /// Evaluate a relative XPath from a specific element context node.
+    pub fn xpath_from(&self, xpath_expr: &str, context_idx: usize) -> Result<Vec<xpath::XPathNode>> {
+        let expr = xpath::parse_xpath(xpath_expr)?;
+        let context_node = xpath::XPathNode::Element(context_idx);
+        xpath::evaluate_from_context(self, &expr, context_node)
+    }
 }

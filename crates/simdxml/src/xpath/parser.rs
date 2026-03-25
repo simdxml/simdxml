@@ -295,6 +295,7 @@ fn step(input: &str) -> IResult<&str, Step> {
 fn axis_specifier(input: &str) -> IResult<&str, Axis> {
     let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '-')(input)?;
     let (input, _) = tag("::")(input)?;
+    let (input, _) = multispace0(input)?;  // XPath allows whitespace after ::
     let axis = match name {
         "child" => Axis::Child,
         "descendant" => Axis::Descendant,

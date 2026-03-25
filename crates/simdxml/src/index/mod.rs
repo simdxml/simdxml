@@ -25,7 +25,7 @@ pub struct XmlIndex<'a> {
     pub(crate) tag_names: Vec<(u32, u16)>,
 
     /// Nesting depth of each tag (0 = root level)
-    pub(crate) depths: Vec<u16>,
+    pub depths: Vec<u16>,
 
     /// Index of parent tag (into tag_starts array). Root tags have parent = u32::MAX.
     pub(crate) parents: Vec<u32>,
