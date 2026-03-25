@@ -280,9 +280,120 @@ fn name_test(input: &str) -> IResult<&str, NodeTest> {
 }
 
 fn predicates(input: &str) -> IResult<&str, Vec<XPathExpr>> {
-    // TODO: implement predicate parsing [expr]
-    // For now, return empty predicates
-    Ok((input, vec![]))
+    nom::multi::many0(predicate)(input)
+}
+
+fn predicate(input: &str) -> IResult<&str, XPathExpr> {
+    delimited(
+        pair(multispace0, char('[')),
+        preceded(multispace0, predicate_expr),
+        pair(multispace0, char(']')),
+    )(input)
+}
+
+/// Expression inside a predicate — supports comparisons, function calls, literals, numbers
+fn predicate_expr(input: &str) -> IResult<&str, XPathExpr> {
+    alt((comparison_expr, primary_expr))(input)
+}
+
+fn comparison_expr(input: &str) -> IResult<&str, XPathExpr> {
+    let (input, left) = primary_expr(input)?;
+    let (input, _) = multispace0(input)?;
+
+    if let Ok((rest, op)) = comparison_op(input) {
+        let (rest, _) = multispace0(rest)?;
+        let (rest, right) = primary_expr(rest)?;
+        Ok((
+            rest,
+            XPathExpr::BinaryOp(Box::new(left), op, Box::new(right)),
+        ))
+    } else {
+        Ok((input, left))
+    }
+}
+
+fn comparison_op(input: &str) -> IResult<&str, BinaryOp> {
+    alt((
+        nom::combinator::map(tag("!="), |_| BinaryOp::Neq),
+        nom::combinator::map(tag("<="), |_| BinaryOp::Lte),
+        nom::combinator::map(tag(">="), |_| BinaryOp::Gte),
+        nom::combinator::map(char('='), |_| BinaryOp::Eq),
+        nom::combinator::map(char('<'), |_| BinaryOp::Lt),
+        nom::combinator::map(char('>'), |_| BinaryOp::Gt),
+    ))(input)
+}
+
+fn primary_expr(input: &str) -> IResult<&str, XPathExpr> {
+    let (input, _) = multispace0(input)?;
+    alt((
+        function_call_expr,
+        string_literal_expr,
+        number_literal_expr,
+        nested_path_expr,
+    ))(input)
+}
+
+fn function_call_expr(input: &str) -> IResult<&str, XPathExpr> {
+    let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '-')(input)?;
+    // Reject node type tests (text, node, comment, processing-instruction)
+    if matches!(name, "text" | "node" | "comment" | "processing-instruction") {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+
+    // Parse arguments (comma-separated)
+    let (input, args) = if input.starts_with(')') {
+        (input, vec![])
+    } else {
+        let (input, first) = predicate_expr(input)?;
+        let (input, rest) = nom::multi::many0(preceded(
+            delimited(multispace0, char(','), multispace0),
+            predicate_expr,
+        ))(input)?;
+        let mut args = vec![first];
+        args.extend(rest);
+        (input, args)
+    };
+
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, XPathExpr::FunctionCall(name.to_string(), args)))
+}
+
+fn string_literal_expr(input: &str) -> IResult<&str, XPathExpr> {
+    alt((single_quoted_string, double_quoted_string))(input)
+}
+
+fn single_quoted_string(input: &str) -> IResult<&str, XPathExpr> {
+    let (input, _) = char('\'')(input)?;
+    let (input, content) = take_while1(|c| c != '\'')(input)?;
+    let (input, _) = char('\'')(input)?;
+    Ok((input, XPathExpr::StringLiteral(content.to_string())))
+}
+
+fn double_quoted_string(input: &str) -> IResult<&str, XPathExpr> {
+    let (input, _) = char('"')(input)?;
+    let (input, content) = take_while1(|c| c != '"')(input)?;
+    let (input, _) = char('"')(input)?;
+    Ok((input, XPathExpr::StringLiteral(content.to_string())))
+}
+
+fn number_literal_expr(input: &str) -> IResult<&str, XPathExpr> {
+    let (input, num_str) = take_while1(|c: char| c.is_ascii_digit() || c == '.')(input)?;
+    let num: f64 = num_str
+        .parse()
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Float)))?;
+    Ok((input, XPathExpr::NumberLiteral(num)))
+}
+
+fn nested_path_expr(input: &str) -> IResult<&str, XPathExpr> {
+    // A location path inside a predicate (e.g., @attr, ., ..)
+    let (input, path) = location_path(input)?;
+    Ok((input, XPathExpr::LocationPath(path)))
 }
 
 #[cfg(test)]
@@ -372,6 +483,98 @@ mod tests {
             XPathExpr::LocationPath(path) => {
                 assert_eq!(path.steps[0].axis, Axis::Ancestor);
                 assert_eq!(path.steps[0].node_test, NodeTest::Name("div".into()));
+            }
+            _ => panic!("Expected LocationPath"),
+        }
+    }
+
+    #[test]
+    fn test_position_predicate() {
+        let expr = parse_xpath("//claim[1]").unwrap();
+        match expr {
+            XPathExpr::LocationPath(path) => {
+                let claim_step = &path.steps[1];
+                assert_eq!(claim_step.predicates.len(), 1);
+                assert_eq!(claim_step.predicates[0], XPathExpr::NumberLiteral(1.0));
+            }
+            _ => panic!("Expected LocationPath"),
+        }
+    }
+
+    #[test]
+    fn test_function_predicate() {
+        let expr = parse_xpath("//p[contains(., 'semiconductor')]").unwrap();
+        match expr {
+            XPathExpr::LocationPath(path) => {
+                let p_step = &path.steps[1];
+                assert_eq!(p_step.predicates.len(), 1);
+                match &p_step.predicates[0] {
+                    XPathExpr::FunctionCall(name, args) => {
+                        assert_eq!(name, "contains");
+                        assert_eq!(args.len(), 2);
+                    }
+                    other => panic!("Expected FunctionCall, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected LocationPath"),
+        }
+    }
+
+    #[test]
+    fn test_attribute_predicate() {
+        let expr = parse_xpath("//claim[@type='independent']").unwrap();
+        match expr {
+            XPathExpr::LocationPath(path) => {
+                let claim_step = &path.steps[1];
+                assert_eq!(claim_step.predicates.len(), 1);
+                match &claim_step.predicates[0] {
+                    XPathExpr::BinaryOp(left, BinaryOp::Eq, right) => {
+                        // left should be @type location path
+                        // right should be 'independent' string
+                        match right.as_ref() {
+                            XPathExpr::StringLiteral(s) => assert_eq!(s, "independent"),
+                            _ => panic!("Expected string literal"),
+                        }
+                    }
+                    other => panic!("Expected BinaryOp, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected LocationPath"),
+        }
+    }
+
+    #[test]
+    fn test_position_function_predicate() {
+        let expr = parse_xpath("//claim[position()=1]").unwrap();
+        match expr {
+            XPathExpr::LocationPath(path) => {
+                let claim_step = &path.steps[1];
+                assert_eq!(claim_step.predicates.len(), 1);
+                match &claim_step.predicates[0] {
+                    XPathExpr::BinaryOp(left, BinaryOp::Eq, right) => {
+                        match left.as_ref() {
+                            XPathExpr::FunctionCall(name, _) => assert_eq!(name, "position"),
+                            _ => panic!("Expected FunctionCall"),
+                        }
+                        match right.as_ref() {
+                            XPathExpr::NumberLiteral(n) => assert_eq!(*n, 1.0),
+                            _ => panic!("Expected NumberLiteral"),
+                        }
+                    }
+                    other => panic!("Expected BinaryOp, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected LocationPath"),
+        }
+    }
+
+    #[test]
+    fn test_multiple_predicates() {
+        let expr = parse_xpath("//claim[@type='independent'][1]").unwrap();
+        match expr {
+            XPathExpr::LocationPath(path) => {
+                let claim_step = &path.steps[1];
+                assert_eq!(claim_step.predicates.len(), 2);
             }
             _ => panic!("Expected LocationPath"),
         }

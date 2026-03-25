@@ -2,12 +2,23 @@ use crate::error::{Result, SimdXmlError};
 use crate::index::{TagType, XmlIndex};
 use super::ast::*;
 
-/// A node in the XPath result set — either a tag index or a text range index.
+/// A node in the XPath result set.
 #[derive(Debug, Clone, Copy)]
 pub enum XPathNode {
-    Element(usize),   // index into tag_starts
-    Text(usize),      // index into text_ranges
-    Attribute(usize, usize), // (tag_idx, attr_name offset) — placeholder
+    Element(usize),              // index into tag_starts
+    Text(usize),                 // index into text_ranges
+    /// (tag_idx, attr_name_hash) — hash used for fast comparison
+    Attribute(usize, u64),
+}
+
+/// Hash an attribute name for storage in XPathNode.
+fn attr_name_hash(name: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325; // FNV-1a
+    for b in name.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 /// Evaluate an XPath expression against an XmlIndex.
@@ -115,7 +126,295 @@ fn eval_step<'a>(
         }
     }
 
+    // Apply predicates (filter the result set)
+    for pred in &step.predicates {
+        result = apply_predicate(index, &result, pred)?;
+    }
+
     Ok(result)
+}
+
+/// Apply a predicate to filter a node set.
+fn apply_predicate<'a>(
+    index: &'a XmlIndex<'a>,
+    nodes: &[XPathNode],
+    pred: &XPathExpr,
+) -> Result<Vec<XPathNode>> {
+    match pred {
+        // Numeric predicate: [1] means position() = 1
+        XPathExpr::NumberLiteral(n) => {
+            let pos = *n as usize;
+            if pos >= 1 && pos <= nodes.len() {
+                Ok(vec![nodes[pos - 1]])
+            } else {
+                Ok(vec![])
+            }
+        }
+
+        // Comparison: [@attr='value'], [position()=N], etc.
+        XPathExpr::BinaryOp(left, op, right) => {
+            let mut result = Vec::new();
+            for (i, &node) in nodes.iter().enumerate() {
+                let left_val = eval_predicate_value(index, node, left, i + 1, nodes.len())?;
+                let right_val = eval_predicate_value(index, node, right, i + 1, nodes.len())?;
+                if compare_values(&left_val, op, &right_val) {
+                    result.push(node);
+                }
+            }
+            Ok(result)
+        }
+
+        // Function call as boolean: [contains(., 'text')]
+        XPathExpr::FunctionCall(name, args) => {
+            let mut result = Vec::new();
+            for (i, &node) in nodes.iter().enumerate() {
+                let val = eval_function(index, node, name, args, i + 1, nodes.len())?;
+                if val.is_truthy() {
+                    result.push(node);
+                }
+            }
+            Ok(result)
+        }
+
+        // Location path as boolean: [@attr] means "has attribute"
+        XPathExpr::LocationPath(_) => {
+            let mut result = Vec::new();
+            for &node in nodes {
+                let sub_nodes = evaluate_in_context(index, node, pred)?;
+                if !sub_nodes.is_empty() {
+                    result.push(node);
+                }
+            }
+            Ok(result)
+        }
+
+        _ => Ok(nodes.to_vec()),
+    }
+}
+
+/// A value in XPath evaluation (string, number, or boolean).
+#[derive(Debug, Clone)]
+enum XPathValue {
+    String(String),
+    Number(f64),
+    Boolean(bool),
+}
+
+impl XPathValue {
+    fn is_truthy(&self) -> bool {
+        match self {
+            XPathValue::Boolean(b) => *b,
+            XPathValue::String(s) => !s.is_empty(),
+            XPathValue::Number(n) => *n != 0.0 && !n.is_nan(),
+        }
+    }
+
+    fn as_string(&self) -> String {
+        match self {
+            XPathValue::String(s) => s.clone(),
+            XPathValue::Number(n) => n.to_string(),
+            XPathValue::Boolean(b) => b.to_string(),
+        }
+    }
+
+    fn as_number(&self) -> f64 {
+        match self {
+            XPathValue::Number(n) => *n,
+            XPathValue::String(s) => s.parse().unwrap_or(f64::NAN),
+            XPathValue::Boolean(b) => if *b { 1.0 } else { 0.0 },
+        }
+    }
+}
+
+fn eval_predicate_value(
+    index: &XmlIndex,
+    node: XPathNode,
+    expr: &XPathExpr,
+    position: usize,
+    size: usize,
+) -> Result<XPathValue> {
+    match expr {
+        XPathExpr::StringLiteral(s) => Ok(XPathValue::String(s.clone())),
+        XPathExpr::NumberLiteral(n) => Ok(XPathValue::Number(*n)),
+        XPathExpr::FunctionCall(name, args) => eval_function(index, node, name, args, position, size),
+        XPathExpr::LocationPath(path) => {
+            // Special case: @attr — extract attribute value directly
+            if path.steps.len() == 1 && path.steps[0].axis == Axis::Attribute {
+                if let XPathNode::Element(idx) = node {
+                    if let NodeTest::Name(attr_name) = &path.steps[0].node_test {
+                        if let Some(val) = index.get_attribute(idx, attr_name) {
+                            return Ok(XPathValue::String(val.to_string()));
+                        }
+                    }
+                }
+                return Ok(XPathValue::String(String::new()));
+            }
+
+            // General case: evaluate path in context and return string value
+            let nodes = evaluate_in_context(index, node, expr)?;
+            if let Some(n) = nodes.first() {
+                Ok(XPathValue::String(node_string_value(index, *n)))
+            } else {
+                Ok(XPathValue::String(String::new()))
+            }
+        }
+        _ => Ok(XPathValue::String(String::new())),
+    }
+}
+
+fn eval_function(
+    index: &XmlIndex,
+    node: XPathNode,
+    name: &str,
+    args: &[XPathExpr],
+    position: usize,
+    size: usize,
+) -> Result<XPathValue> {
+    match name {
+        "position" => Ok(XPathValue::Number(position as f64)),
+        "last" => Ok(XPathValue::Number(size as f64)),
+        "count" => {
+            if let Some(arg) = args.first() {
+                let nodes = evaluate_in_context(index, node, arg)?;
+                Ok(XPathValue::Number(nodes.len() as f64))
+            } else {
+                Ok(XPathValue::Number(0.0))
+            }
+        }
+        "contains" => {
+            if args.len() >= 2 {
+                let haystack = eval_predicate_value(index, node, &args[0], position, size)?.as_string();
+                let needle = eval_predicate_value(index, node, &args[1], position, size)?.as_string();
+                Ok(XPathValue::Boolean(haystack.contains(&needle)))
+            } else {
+                Ok(XPathValue::Boolean(false))
+            }
+        }
+        "starts-with" => {
+            if args.len() >= 2 {
+                let haystack = eval_predicate_value(index, node, &args[0], position, size)?.as_string();
+                let prefix = eval_predicate_value(index, node, &args[1], position, size)?.as_string();
+                Ok(XPathValue::Boolean(haystack.starts_with(&prefix)))
+            } else {
+                Ok(XPathValue::Boolean(false))
+            }
+        }
+        "string-length" => {
+            let s = if let Some(arg) = args.first() {
+                eval_predicate_value(index, node, arg, position, size)?.as_string()
+            } else {
+                node_string_value(index, node)
+            };
+            Ok(XPathValue::Number(s.len() as f64))
+        }
+        "normalize-space" => {
+            let s = if let Some(arg) = args.first() {
+                eval_predicate_value(index, node, arg, position, size)?.as_string()
+            } else {
+                node_string_value(index, node)
+            };
+            let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
+            Ok(XPathValue::String(normalized))
+        }
+        "not" => {
+            if let Some(arg) = args.first() {
+                let val = eval_predicate_value(index, node, arg, position, size)?;
+                Ok(XPathValue::Boolean(!val.is_truthy()))
+            } else {
+                Ok(XPathValue::Boolean(true))
+            }
+        }
+        "true" => Ok(XPathValue::Boolean(true)),
+        "false" => Ok(XPathValue::Boolean(false)),
+        "name" | "local-name" => {
+            match node {
+                XPathNode::Element(idx) if idx != DOC_ROOT => {
+                    Ok(XPathValue::String(index.tag_name(idx).to_string()))
+                }
+                _ => Ok(XPathValue::String(String::new())),
+            }
+        }
+        "string" => {
+            if let Some(arg) = args.first() {
+                let val = eval_predicate_value(index, node, arg, position, size)?;
+                Ok(XPathValue::String(val.as_string()))
+            } else {
+                Ok(XPathValue::String(node_string_value(index, node)))
+            }
+        }
+        "concat" => {
+            let mut result = String::new();
+            for arg in args {
+                result.push_str(&eval_predicate_value(index, node, arg, position, size)?.as_string());
+            }
+            Ok(XPathValue::String(result))
+        }
+        "substring" => {
+            if args.len() >= 2 {
+                let s = eval_predicate_value(index, node, &args[0], position, size)?.as_string();
+                let start = eval_predicate_value(index, node, &args[1], position, size)?.as_number() as usize;
+                let start = start.saturating_sub(1); // XPath is 1-indexed
+                if args.len() >= 3 {
+                    let len = eval_predicate_value(index, node, &args[2], position, size)?.as_number() as usize;
+                    Ok(XPathValue::String(s.chars().skip(start).take(len).collect()))
+                } else {
+                    Ok(XPathValue::String(s.chars().skip(start).collect()))
+                }
+            } else {
+                Ok(XPathValue::String(String::new()))
+            }
+        }
+        _ => Ok(XPathValue::String(String::new())),
+    }
+}
+
+fn compare_values(left: &XPathValue, op: &BinaryOp, right: &XPathValue) -> bool {
+    match op {
+        BinaryOp::Eq => left.as_string() == right.as_string() || left.as_number() == right.as_number(),
+        BinaryOp::Neq => left.as_string() != right.as_string() && left.as_number() != right.as_number(),
+        BinaryOp::Lt => left.as_number() < right.as_number(),
+        BinaryOp::Gt => left.as_number() > right.as_number(),
+        BinaryOp::Lte => left.as_number() <= right.as_number(),
+        BinaryOp::Gte => left.as_number() >= right.as_number(),
+        _ => false,
+    }
+}
+
+fn node_string_value(index: &XmlIndex, node: XPathNode) -> String {
+    match node {
+        XPathNode::Element(idx) if idx != DOC_ROOT => index.all_text(idx),
+        XPathNode::Text(idx) => index.text_content(&index.text_ranges[idx]).to_string(),
+        XPathNode::Attribute(tag_idx, _) => {
+            // The attribute name is stored as the step's node_test
+            // For now, we need to get the last-evaluated attribute name
+            // This is a limitation — we'd need to pass the attr name through
+            String::new()
+        }
+        _ => String::new(),
+    }
+}
+
+/// Evaluate an expression in the context of a specific node.
+fn evaluate_in_context(
+    index: &XmlIndex,
+    context_node: XPathNode,
+    expr: &XPathExpr,
+) -> Result<Vec<XPathNode>> {
+    match expr {
+        XPathExpr::LocationPath(path) if !path.absolute => {
+            // Relative path: evaluate from context node
+            let mut context = vec![context_node];
+            for step in &path.steps {
+                context = eval_step(index, &context, step)?;
+            }
+            Ok(context)
+        }
+        XPathExpr::LocationPath(path) => {
+            // Absolute path: evaluate from document root
+            evaluate(index, expr)
+        }
+        _ => Ok(vec![]),
+    }
 }
 
 fn matches_node_test(index: &XmlIndex, node: XPathNode, test: &NodeTest) -> bool {
@@ -519,5 +818,124 @@ mod tests {
         let index = parse_scalar(xml).unwrap();
         let ancestors = eval_ancestor_axis(&index, XPathNode::Element(2), false); // c's ancestors
         assert_eq!(ancestors.len(), 2); // b and a
+    }
+
+    // --- Predicate tests ---
+
+    #[test]
+    fn test_position_predicate() {
+        let names = query_names(
+            b"<root><a/><b/><c/></root>",
+            "/root/*[1]",
+        );
+        assert_eq!(names, vec!["a"]);
+    }
+
+    #[test]
+    fn test_position_predicate_last() {
+        let names = query_names(
+            b"<root><a/><b/><c/></root>",
+            "/root/*[3]",
+        );
+        assert_eq!(names, vec!["c"]);
+    }
+
+    #[test]
+    fn test_position_function_predicate() {
+        let names = query_names(
+            b"<root><a/><b/><c/></root>",
+            "/root/*[position()=2]",
+        );
+        assert_eq!(names, vec!["b"]);
+    }
+
+    #[test]
+    fn test_last_function_predicate() {
+        let names = query_names(
+            b"<root><a/><b/><c/></root>",
+            "/root/*[position()=last()]",
+        );
+        assert_eq!(names, vec!["c"]);
+    }
+
+    #[test]
+    fn test_attribute_value_predicate() {
+        let texts = query_text(
+            b"<root><item type='a'>first</item><item type='b'>second</item></root>",
+            "/root/item[@type='b']",
+        );
+        assert_eq!(texts, vec!["second"]);
+    }
+
+    #[test]
+    fn test_contains_predicate() {
+        let texts = query_text(
+            b"<root><p>hello world</p><p>goodbye</p></root>",
+            "/root/p[contains(., 'world')]",
+        );
+        assert_eq!(texts, vec!["hello world"]);
+    }
+
+    #[test]
+    fn test_starts_with_predicate() {
+        let texts = query_text(
+            b"<root><p>hello world</p><p>goodbye</p></root>",
+            "/root/p[starts-with(., 'hello')]",
+        );
+        assert_eq!(texts, vec!["hello world"]);
+    }
+
+    #[test]
+    fn test_multiple_predicates() {
+        let xml = b"<root><item type='a'>first</item><item type='b'>second</item><item type='a'>third</item></root>";
+        // All items with type='a', then take the first
+        let texts = query_text(xml, "/root/item[@type='a'][1]");
+        assert_eq!(texts, vec!["first"]);
+    }
+
+    // --- Patent-specific tests ---
+
+    #[test]
+    fn test_patent_claims() {
+        let xml = include_bytes!("../../../../testdata/small.xml");
+        let texts = query_text(xml, "//claim");
+        assert_eq!(texts.len(), 3);
+        assert!(texts[0].contains("prosthetic arm device"));
+    }
+
+    #[test]
+    fn test_patent_independent_claims() {
+        let xml = include_bytes!("../../../../testdata/small.xml");
+        let texts = query_text(xml, "//claim[@type='independent']");
+        assert_eq!(texts.len(), 1);
+        assert!(texts[0].contains("prosthetic arm device"));
+    }
+
+    #[test]
+    fn test_patent_dependent_claims() {
+        let xml = include_bytes!("../../../../testdata/small.xml");
+        let texts = query_text(xml, "//claim[@type='dependent']");
+        assert_eq!(texts.len(), 2);
+    }
+
+    #[test]
+    fn test_patent_title() {
+        let xml = include_bytes!("../../../../testdata/small.xml");
+        let texts = query_text(xml, "/patent/title");
+        assert_eq!(texts, vec!["Prosthetic Arm Device"]);
+    }
+
+    #[test]
+    fn test_patent_description_paragraphs() {
+        let xml = include_bytes!("../../../../testdata/small.xml");
+        let texts = query_text(xml, "/patent/description/p");
+        assert_eq!(texts.len(), 2);
+    }
+
+    #[test]
+    fn test_patent_first_claim() {
+        let xml = include_bytes!("../../../../testdata/small.xml");
+        let texts = query_text(xml, "//claim[1]");
+        assert_eq!(texts.len(), 1);
     }
 }
