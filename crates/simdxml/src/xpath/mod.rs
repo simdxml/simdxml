@@ -2,6 +2,7 @@ pub mod analyze;
 pub mod ast;
 pub mod eval;
 pub mod parser;
+pub mod simd_pred;
 
 pub use ast::XPathExpr;
 pub use eval::{evaluate, evaluate_from_context, eval_text, eval_standalone_expr, eval_expr_with_doc, eval_expr_with_context, StandaloneResult, XPathNode};

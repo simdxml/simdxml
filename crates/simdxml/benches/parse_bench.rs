@@ -609,6 +609,50 @@ fn bench_batch(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// SIMD predicate evaluation: contains/starts-with batching
+// ============================================================================
+
+fn bench_simd_predicates(c: &mut Criterion) {
+    let data = load("patent_large.xml");
+    let index = simdxml::parse(&data).unwrap();
+
+    let mut group = c.benchmark_group("simd_pred");
+
+    // contains predicate — the SIMD batch path should kick in automatically
+    let contains_query = simdxml::CompiledXPath::compile("//p[contains(., 'the')]").unwrap();
+    group.bench_function("contains_common", |b| {
+        b.iter(|| {
+            let _ = contains_query.eval(&index).unwrap();
+        });
+    });
+
+    let contains_rare = simdxml::CompiledXPath::compile("//p[contains(., 'prosthetic')]").unwrap();
+    group.bench_function("contains_rare", |b| {
+        b.iter(|| {
+            let _ = contains_rare.eval(&index).unwrap();
+        });
+    });
+
+    let starts_with = simdxml::CompiledXPath::compile("//claim[starts-with(., 'A')]").unwrap();
+    group.bench_function("starts_with", |b| {
+        b.iter(|| {
+            let _ = starts_with.eval(&index).unwrap();
+        });
+    });
+
+    // End-to-end with contains predicate
+    let e2e_query = simdxml::CompiledXPath::compile("//claim[contains(., 'device')]").unwrap();
+    group.bench_function("e2e_contains", |b| {
+        b.iter(|| {
+            let idx = simdxml::parse(&data).unwrap();
+            let _ = e2e_query.eval(&idx).unwrap();
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_throughput,
@@ -622,5 +666,6 @@ criterion_group!(
     bench_lazy_parse,
     bench_bloom,
     bench_batch,
+    bench_simd_predicates,
 );
 criterion_main!(benches);

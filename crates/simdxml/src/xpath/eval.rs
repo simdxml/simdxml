@@ -71,7 +71,7 @@ pub enum XPathNode {
 }
 
 /// Hash an attribute name for storage in XPathNode.
-fn attr_name_hash(name: &str) -> u64 {
+pub(crate) fn attr_name_hash(name: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325; // FNV-1a
     for b in name.bytes() {
         h ^= b as u64;
@@ -600,6 +600,11 @@ fn apply_predicate<'a>(
         // Function call in predicate: if result is a number, treat as positional
         // (XPath 1.0 §3.4: if result is number, compare to position())
         XPathExpr::FunctionCall(name, args) => {
+            // SIMD batch path for contains(., 'literal') and starts-with(., 'literal')
+            if let Some(result) = try_batch_string_predicate(index, nodes, name, args) {
+                return Ok(result);
+            }
+
             let mut result = Vec::new();
             for (i, &node) in nodes.iter().enumerate() {
                 let val = eval_function(index, node, name, args, i + 1, nodes.len())?;
@@ -1646,6 +1651,55 @@ fn eval_namespace_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
     ns_map.into_iter()
         .map(|(_, hash)| XPathNode::Namespace(idx, hash))
         .collect()
+}
+
+/// Try to use SIMD batched evaluation for `contains(., 'literal')` or
+/// `starts-with(., 'literal')` predicates. Returns `Some(filtered_nodes)` if
+/// the pattern matches, `None` to fall back to per-node evaluation.
+fn try_batch_string_predicate(
+    index: &XmlIndex,
+    nodes: &[XPathNode],
+    func_name: &str,
+    args: &[XPathExpr],
+) -> Option<Vec<XPathNode>> {
+    // Must be contains() or starts-with() with exactly 2 args
+    if args.len() != 2 {
+        return None;
+    }
+
+    // First arg must be self (.) — a location path with single self::node() step
+    let is_self_ref = match &args[0] {
+        XPathExpr::LocationPath(path) => {
+            !path.absolute && path.steps.len() == 1
+                && path.steps[0].axis == super::ast::Axis::SelfAxis
+                && path.steps[0].node_test == super::ast::NodeTest::Node
+                && path.steps[0].predicates.is_empty()
+        }
+        _ => false,
+    };
+    if !is_self_ref {
+        return None;
+    }
+
+    // Second arg must be a string literal
+    let needle = match &args[1] {
+        XPathExpr::StringLiteral(s) => s.as_str(),
+        _ => return None,
+    };
+
+    let mask = match func_name {
+        "contains" => super::simd_pred::batch_contains(index, nodes, needle),
+        "starts-with" => super::simd_pred::batch_starts_with(index, nodes, needle),
+        _ => return None,
+    };
+
+    let filtered: Vec<XPathNode> = nodes.iter()
+        .zip(mask.iter())
+        .filter(|(_, &keep)| keep)
+        .map(|(&node, _)| node)
+        .collect();
+
+    Some(filtered)
 }
 
 #[cfg(test)]
