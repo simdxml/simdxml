@@ -39,10 +39,34 @@ const OFFSET_TABLE_SIZE: usize = NUM_SECTIONS * 8;
 
 // Flags
 const FLAG_HAS_NAME_INDEX: u16 = 1;
+const FLAG_HAS_BLOOM: u16 = 2;
 
 /// Compute xxh3-64 content hash for staleness detection.
 fn content_hash(data: &[u8]) -> u64 {
     xxhash_rust::xxh3::xxh3_64(data)
+}
+
+/// Read just the bloom filter from an `.sxi` file header.
+///
+/// This is very fast (reads only 64 bytes) and can be used to skip files
+/// without loading the full index.
+pub fn read_bloom(sxi_path: impl AsRef<Path>) -> Result<crate::bloom::TagBloom> {
+    let mut buf = [0u8; HEADER_SIZE];
+    let mut f = File::open(sxi_path)?;
+    std::io::Read::read_exact(&mut f, &mut buf)?;
+
+    if &buf[0..4] != &MAGIC {
+        return Err(SimdXmlError::InvalidSxi("bad magic bytes".into()));
+    }
+
+    let flags = u16::from_le_bytes(buf[26..28].try_into().unwrap());
+    if flags & FLAG_HAS_BLOOM == 0 {
+        return Ok(crate::bloom::TagBloom::EMPTY);
+    }
+
+    let mut bloom_bytes = [0u8; 16];
+    bloom_bytes.copy_from_slice(&buf[28..44]);
+    Ok(crate::bloom::TagBloom::from_bytes(bloom_bytes))
 }
 
 /// Serialize an `XmlIndex` to a `.sxi` file.
@@ -60,8 +84,9 @@ pub fn serialize_index(
     let text_count = index.text_count() as u32;
     let has_names = !index.name_ids.is_empty();
     let name_count = if has_names { index.name_table.len() as u16 } else { 0 };
-    let flags: u16 = if has_names { FLAG_HAS_NAME_INDEX } else { 0 };
+    let flags: u16 = if has_names { FLAG_HAS_NAME_INDEX } else { 0 } | FLAG_HAS_BLOOM;
     let xml_hash = content_hash(xml_bytes);
+    let bloom = crate::bloom::TagBloom::from_index(index);
 
     // === Header (64 bytes) ===
     let mut header = [0u8; HEADER_SIZE];
@@ -72,7 +97,7 @@ pub fn serialize_index(
     header[20..24].copy_from_slice(&text_count.to_le_bytes());
     header[24..26].copy_from_slice(&name_count.to_le_bytes());
     header[26..28].copy_from_slice(&flags.to_le_bytes());
-    // bytes 28..44: bloom (reserved for Phase 3)
+    header[28..44].copy_from_slice(&bloom.to_bytes());
     // bytes 44..64: padding
     w.write_all(&header)?;
 

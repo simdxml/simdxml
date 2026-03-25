@@ -512,6 +512,52 @@ fn bench_lazy_parse(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Bloom filter: prescan throughput and skip effectiveness
+// ============================================================================
+
+fn bench_bloom(c: &mut Criterion) {
+    let data = load("patent_large.xml");
+
+    let mut group = c.benchmark_group("bloom");
+    group.throughput(Throughput::Bytes(data.len() as u64));
+
+    // Prescan speed (building bloom from raw XML)
+    group.bench_function("prescan", |b| {
+        b.iter(|| {
+            let _ = simdxml::TagBloom::from_prescan(&data);
+        });
+    });
+
+    // Full parse for comparison
+    group.bench_function("full_parse", |b| {
+        b.iter(|| {
+            let _ = simdxml::parse(&data).unwrap();
+        });
+    });
+
+    // Bloom check + conditional parse (hit: tag exists)
+    let bloom = simdxml::TagBloom::from_prescan(&data);
+    group.bench_function("check_hit_then_parse", |b| {
+        b.iter(|| {
+            if bloom.may_contain(b"claim") {
+                let _ = simdxml::parse(&data).unwrap();
+            }
+        });
+    });
+
+    // Bloom check + conditional parse (miss: tag doesn't exist)
+    group.bench_function("check_miss_skip", |b| {
+        b.iter(|| {
+            if bloom.may_contain(b"nonexistent_rare_tag_xyz") {
+                let _ = simdxml::parse(&data).unwrap();
+            }
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_throughput,
@@ -523,5 +569,6 @@ criterion_group!(
     bench_realworld,
     bench_persist,
     bench_lazy_parse,
+    bench_bloom,
 );
 criterion_main!(benches);

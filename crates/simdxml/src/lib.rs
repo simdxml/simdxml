@@ -21,12 +21,14 @@
 //! let texts = expr.eval_text(&index).unwrap();
 //! ```
 
+pub mod bloom;
 pub mod error;
 pub mod index;
 pub mod persist;
 pub mod simd;
 pub mod xpath;
 
+pub use bloom::TagBloom;
 pub use error::{Result, SimdXmlError};
 pub use index::XmlIndex;
 pub use persist::OwnedXmlIndex;
