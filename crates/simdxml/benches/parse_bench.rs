@@ -373,9 +373,12 @@ fn bench_realworld(c: &mut Criterion) {
             });
         });
 
-        group.bench_function("roxmltree", |b| {
-            b.iter(|| { let _ = roxmltree::Document::parse(data_str).unwrap(); });
-        });
+        // roxmltree panics on DTD-containing files; skip gracefully
+        if roxmltree::Document::parse(data_str).is_ok() {
+            group.bench_function("roxmltree", |b| {
+                b.iter(|| { let _ = roxmltree::Document::parse(data_str).unwrap(); });
+            });
+        }
 
         group.finish();
     }
