@@ -1,3 +1,4 @@
+pub mod analyze;
 pub mod ast;
 pub mod eval;
 pub mod parser;
@@ -29,5 +30,21 @@ impl CompiledXPath {
     /// Evaluate and return text content of matching nodes.
     pub fn eval_text<'a>(&self, index: &'a XmlIndex<'a>) -> Result<Vec<&'a str>> {
         eval_text(index, &self.expr)
+    }
+
+    /// Analyze this expression for query-driven lazy parsing.
+    ///
+    /// Returns the set of tag names referenced, or `None` if the query
+    /// uses wildcards/node() and requires all tags.
+    pub fn interesting_names(&self) -> Option<std::collections::HashSet<String>> {
+        match analyze::selectivity(&self.expr) {
+            analyze::SelectivityHint::Selective(names) => Some(names),
+            analyze::SelectivityHint::NeedsAll => None,
+        }
+    }
+
+    /// Access the underlying parsed expression.
+    pub fn expr(&self) -> &XPathExpr {
+        &self.expr
     }
 }

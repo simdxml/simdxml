@@ -458,6 +458,60 @@ fn bench_persist(c: &mut Criterion) {
     fs::remove_file(&xml_path).ok();
 }
 
+// ============================================================================
+// Lazy parsing: query-driven selective indexing
+// ============================================================================
+
+fn bench_lazy_parse(c: &mut Criterion) {
+    use std::collections::HashSet;
+
+    let data = load("patent_large.xml");
+
+    let mut group = c.benchmark_group("lazy_parse");
+    group.throughput(Throughput::Bytes(data.len() as u64));
+
+    // Baseline: full parse
+    group.bench_function("full_parse", |b| {
+        b.iter(|| {
+            let _ = simdxml::parse(&data).unwrap();
+        });
+    });
+
+    // Lazy: only index "claim" tags
+    let claim_names: HashSet<String> = ["claim"].iter().map(|s| s.to_string()).collect();
+    group.bench_function("lazy_claim", |b| {
+        b.iter(|| {
+            let _ = simdxml::index::lazy::parse_for_query(&data, &claim_names).unwrap();
+        });
+    });
+
+    // Lazy: only index "title" tags (fewer matches)
+    let title_names: HashSet<String> = ["title"].iter().map(|s| s.to_string()).collect();
+    group.bench_function("lazy_title", |b| {
+        b.iter(|| {
+            let _ = simdxml::index::lazy::parse_for_query(&data, &title_names).unwrap();
+        });
+    });
+
+    // End-to-end: full parse + xpath vs lazy parse + xpath
+    let compiled = simdxml::CompiledXPath::compile("//claim").unwrap();
+    group.bench_function("e2e_full_claim", |b| {
+        b.iter(|| {
+            let idx = simdxml::parse(&data).unwrap();
+            let _ = compiled.eval_text(&idx).unwrap();
+        });
+    });
+
+    group.bench_function("e2e_lazy_claim", |b| {
+        b.iter(|| {
+            let idx = simdxml::parse_for_xpath(&data, "//claim").unwrap();
+            let _ = compiled.eval_text(&idx).unwrap();
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_throughput,
@@ -468,5 +522,6 @@ criterion_group!(
     bench_multi_query,
     bench_realworld,
     bench_persist,
+    bench_lazy_parse,
 );
 criterion_main!(benches);

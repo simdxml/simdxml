@@ -1,3 +1,4 @@
+pub mod lazy;
 pub mod structural;
 pub mod tags;
 

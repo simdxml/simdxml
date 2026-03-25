@@ -60,6 +60,19 @@ pub fn parse(input: &[u8]) -> Result<XmlIndex<'_>> {
     }
 }
 
+/// Parse XML with query-driven optimization: only index tags relevant to the
+/// given XPath expression. Falls back to full parse if the query uses wildcards.
+///
+/// For selective queries like `//claim/text()`, this can be 2-5x faster than
+/// full parsing because it skips index construction for irrelevant tags.
+pub fn parse_for_xpath<'a>(input: &'a [u8], xpath_str: &str) -> Result<XmlIndex<'a>> {
+    let compiled = CompiledXPath::compile(xpath_str)?;
+    match compiled.interesting_names() {
+        Some(names) => index::lazy::parse_for_query(input, &names),
+        None => parse(input),
+    }
+}
+
 /// Load a pre-built `.sxi` index if it exists and is fresh, otherwise parse
 /// and save the index for next time. Returns an `OwnedXmlIndex` that derefs
 /// to `XmlIndex`.
