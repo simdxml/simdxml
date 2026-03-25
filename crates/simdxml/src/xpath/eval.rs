@@ -1180,9 +1180,9 @@ fn matches_node_test(index: &XmlIndex, node: XPathNode, test: &NodeTest) -> bool
     match (node, test) {
         (_, NodeTest::Node) => true,
         (XPathNode::Element(idx), NodeTest::Wildcard) => {
-            // Wildcard matches elements (Open/SelfClose) but NOT comments/PIs/CData
-            idx == DOC_ROOT || (idx < index.tag_count()
-                && (index.tag_types[idx] == TagType::Open || index.tag_types[idx] == TagType::SelfClose))
+            // Wildcard matches elements (Open/SelfClose) but NOT DOC_ROOT, comments, PIs, CData
+            idx != DOC_ROOT && idx < index.tag_count()
+                && (index.tag_types[idx] == TagType::Open || index.tag_types[idx] == TagType::SelfClose)
         }
         (XPathNode::Namespace(_, _), NodeTest::Wildcard) => true,
         (XPathNode::Attribute(_, _), NodeTest::Wildcard) => true,
@@ -1348,7 +1348,8 @@ fn eval_parent_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
             if parent != u32::MAX {
                 vec![XPathNode::Element(parent as usize)]
             } else {
-                vec![]
+                // Root element's parent is the document root
+                vec![XPathNode::Element(DOC_ROOT)]
             }
         }
         XPathNode::Text(idx) => {
@@ -1356,7 +1357,7 @@ fn eval_parent_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
             if parent != u32::MAX {
                 vec![XPathNode::Element(parent as usize)]
             } else {
-                vec![]
+                vec![XPathNode::Element(DOC_ROOT)]
             }
         }
         XPathNode::Attribute(tag_idx, _) => vec![XPathNode::Element(tag_idx)],
@@ -1382,6 +1383,11 @@ fn eval_ancestor_axis(index: &XmlIndex, node: XPathNode, include_self: bool) -> 
     while current != u32::MAX && (current as usize) < index.tag_count() {
         result.push(XPathNode::Element(current as usize));
         current = index.parents[current as usize];
+    }
+
+    // Include the document root node as the ultimate ancestor
+    if !matches!(node, XPathNode::Element(DOC_ROOT)) {
+        result.push(XPathNode::Element(DOC_ROOT));
     }
 
     result
@@ -1777,7 +1783,7 @@ mod tests {
         let xml = b"<a><b><c/></b></a>";
         let index = parse_scalar(xml).unwrap();
         let ancestors = eval_ancestor_axis(&index, XPathNode::Element(2), false); // c's ancestors
-        assert_eq!(ancestors.len(), 2); // b and a
+        assert_eq!(ancestors.len(), 3); // b, a, and document root
     }
 
     // --- Predicate tests ---
