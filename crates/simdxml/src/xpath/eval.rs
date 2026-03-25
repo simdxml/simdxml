@@ -611,11 +611,14 @@ fn eval_following_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
     let XPathNode::Element(idx) = node else {
         return vec![];
     };
+    if idx == DOC_ROOT || idx >= index.tag_count() {
+        return vec![];
+    }
 
     let close = index.matching_close(idx).unwrap_or(idx);
     let mut result = Vec::new();
 
-    for i in (close + 1)..index.tag_count() {
+    for i in (close.saturating_add(1))..index.tag_count() {
         if index.tag_types[i] == TagType::Open || index.tag_types[i] == TagType::SelfClose {
             result.push(XPathNode::Element(i));
         }

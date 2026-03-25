@@ -58,6 +58,9 @@ pub struct TextRange {
 impl<'a> XmlIndex<'a> {
     /// Get the tag name as a string slice.
     pub fn tag_name(&self, tag_idx: usize) -> &'a str {
+        if tag_idx >= self.tag_names.len() {
+            return "";
+        }
         let (offset, len) = self.tag_names[tag_idx];
         let bytes = &self.input[offset as usize..(offset + len as u32) as usize];
         std::str::from_utf8(bytes).unwrap_or("")
@@ -81,6 +84,9 @@ impl<'a> XmlIndex<'a> {
 
     /// Find the index of the close tag matching an open tag.
     pub fn matching_close(&self, open_idx: usize) -> Option<usize> {
+        if open_idx >= self.tag_count() {
+            return None;
+        }
         if self.tag_types[open_idx] == TagType::SelfClose {
             return Some(open_idx);
         }
