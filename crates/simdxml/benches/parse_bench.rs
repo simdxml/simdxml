@@ -558,6 +558,57 @@ fn bench_bloom(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Batch evaluation: one-at-a-time vs batch vs batch+bloom
+// ============================================================================
+
+fn bench_batch(c: &mut Criterion) {
+    // Create 100 copies of the medium patent doc for batching
+    let single = load("patent_medium.xml");
+    let docs: Vec<Vec<u8>> = (0..100).map(|_| single.clone()).collect();
+    let doc_refs: Vec<&[u8]> = docs.iter().map(|d| d.as_slice()).collect();
+
+    let total_bytes: u64 = docs.iter().map(|d| d.len() as u64).sum();
+    let compiled = simdxml::CompiledXPath::compile("//claim").unwrap();
+
+    let mut group = c.benchmark_group("batch");
+    group.throughput(Throughput::Bytes(total_bytes));
+
+    // One at a time (no batch API)
+    group.bench_function("one_at_a_time_100", |b| {
+        b.iter(|| {
+            for doc in &doc_refs {
+                let mut idx = simdxml::parse(doc).unwrap();
+                idx.build_name_index();
+                let _ = compiled.eval_text(&idx).unwrap();
+            }
+        });
+    });
+
+    // Batch API (full parse)
+    group.bench_function("batch_100", |b| {
+        b.iter(|| {
+            let _ = simdxml::batch::eval_batch_text(&doc_refs, &compiled).unwrap();
+        });
+    });
+
+    // Batch + lazy parsing
+    group.bench_function("batch_lazy_100", |b| {
+        b.iter(|| {
+            let _ = simdxml::batch::eval_batch_text_lazy(&doc_refs, &compiled).unwrap();
+        });
+    });
+
+    // Batch + bloom + lazy parsing
+    group.bench_function("batch_bloom_100", |b| {
+        b.iter(|| {
+            let _ = simdxml::batch::eval_batch_text_bloom(&doc_refs, &compiled).unwrap();
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_throughput,
@@ -570,5 +621,6 @@ criterion_group!(
     bench_persist,
     bench_lazy_parse,
     bench_bloom,
+    bench_batch,
 );
 criterion_main!(benches);

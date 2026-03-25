@@ -21,6 +21,7 @@
 //! let texts = expr.eval_text(&index).unwrap();
 //! ```
 
+pub mod batch;
 pub mod bloom;
 pub mod error;
 pub mod index;
