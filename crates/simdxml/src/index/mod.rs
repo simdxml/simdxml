@@ -144,115 +144,47 @@ impl<'a> XmlIndex<'a> {
 
     /// Build precomputed indices for fast XPath evaluation.
     /// Called once after structural parsing. O(n) time, flat memory layout.
+    ///
+    /// Runs 3 independent computations concurrently:
+    /// - Thread 1: CSR child index (tag children)
+    /// - Thread 2: CSR text child index (text range children)
+    /// - Main thread: Fused close_map + post_order (single stack-based pass)
     pub(crate) fn build_indices(&mut self) {
         let n = self.tag_count();
 
-        // 1. Count children per parent (two-pass CSR build)
-        let mut child_counts = vec![0u32; n + 1];
-        for i in 0..n {
-            let tt = self.tag_types[i];
-            if tt == TagType::Close || tt == TagType::CData {
-                continue;
-            }
-            let parent = self.parents[i];
-            if parent != u32::MAX && (parent as usize) < n {
-                child_counts[parent as usize] += 1;
-            }
-        }
+        // Shared read-only references for parallel work
+        let tag_types = &self.tag_types;
+        let parents = &self.parents;
+        let text_ranges = &self.text_ranges;
 
-        // Prefix sum → offsets
-        let mut child_offsets = vec![0u32; n + 1];
-        for i in 0..n {
-            child_offsets[i + 1] = child_offsets[i] + child_counts[i];
-        }
-        let total_children = child_offsets[n] as usize;
-        let mut child_data = vec![0u32; total_children];
+        // Run CSR builds and close_map+post_order concurrently
+        let (child_offsets, child_data, text_child_offsets, text_child_data,
+             close_map, post_order) = std::thread::scope(|scope| {
 
-        // Fill child_data (second pass)
-        let mut write_pos = child_offsets.clone();
-        for i in 0..n {
-            let tt = self.tag_types[i];
-            if tt == TagType::Close || tt == TagType::CData {
-                continue;
-            }
-            let parent = self.parents[i];
-            if parent != u32::MAX && (parent as usize) < n {
-                let p = parent as usize;
-                child_data[write_pos[p] as usize] = i as u32;
-                write_pos[p] += 1;
-            }
-        }
+            // Thread 1: CSR child index
+            let csr_children = scope.spawn(move || {
+                build_csr_children(tag_types, parents, n)
+            });
 
-        // 2. CSR for text children
-        let mut text_counts = vec![0u32; n + 1];
-        for range in &self.text_ranges {
-            let parent = range.parent_tag;
-            if parent != u32::MAX && (parent as usize) < n {
-                text_counts[parent as usize] += 1;
-            }
-        }
-        let mut text_child_offsets = vec![0u32; n + 1];
-        for i in 0..n {
-            text_child_offsets[i + 1] = text_child_offsets[i] + text_counts[i];
-        }
-        let total_text = text_child_offsets[n] as usize;
-        let mut text_child_data = vec![0u32; total_text];
-        let mut text_write_pos = text_child_offsets.clone();
-        for (ti, range) in self.text_ranges.iter().enumerate() {
-            let parent = range.parent_tag;
-            if parent != u32::MAX && (parent as usize) < n {
-                let p = parent as usize;
-                text_child_data[text_write_pos[p] as usize] = ti as u32;
-                text_write_pos[p] += 1;
-            }
-        }
+            // Thread 2: CSR text child index
+            let csr_text = scope.spawn(move || {
+                build_csr_text_children(text_ranges, n)
+            });
 
-        // 3. Close map using a stack (O(n))
-        let mut close_map = vec![u32::MAX; n];
-        let mut stack: Vec<usize> = Vec::new();
-        for i in 0..n {
-            match self.tag_types[i] {
-                TagType::Open => stack.push(i),
-                TagType::Close => {
-                    if let Some(open_idx) = stack.pop() {
-                        close_map[open_idx] = i as u32;
-                    }
-                }
-                TagType::SelfClose => close_map[i] = i as u32,
-                _ => {}
-            }
-        }
+            // Main thread: fused close_map + post_order (single pass)
+            let (close_map, post_order) = build_close_map_and_post_order(tag_types, n);
+
+            let (co, cd) = csr_children.join().unwrap();
+            let (tco, tcd) = csr_text.join().unwrap();
+
+            (co, cd, tco, tcd, close_map, post_order)
+        });
 
         self.child_offsets = child_offsets;
         self.child_data = child_data;
         self.text_child_offsets = text_child_offsets;
         self.text_child_data = text_child_data;
         self.close_map = close_map;
-
-        // 4. Post-order numbering (O(n)):
-        // Assign increasing post-order numbers. An open tag gets its number
-        // when its close tag is encountered. Enables O(1) ancestor checks:
-        //   A is ancestor of B iff pre(A) < pre(B) AND post(A) > post(B)
-        // where pre-order number is just the tag index.
-        let mut post_order = vec![0u32; n];
-        let mut post_counter: u32 = 0;
-        let mut open_stack: Vec<usize> = Vec::new();
-        for i in 0..n {
-            match self.tag_types[i] {
-                TagType::Open => open_stack.push(i),
-                TagType::Close => {
-                    if let Some(open_idx) = open_stack.pop() {
-                        post_order[open_idx] = post_counter;
-                    }
-                    post_order[i] = post_counter;
-                    post_counter += 1;
-                }
-                TagType::SelfClose | TagType::Comment | TagType::PI | TagType::CData => {
-                    post_order[i] = post_counter;
-                    post_counter += 1;
-                }
-            }
-        }
         self.post_order = post_order;
 
         // Name interning + inverted index left empty — built on demand
@@ -514,4 +446,120 @@ impl<'a> XmlIndex<'a> {
         }
         result
     }
+}
+
+// === Free functions for parallel build_indices ===
+
+/// Build CSR child index from tag_types and parents arrays.
+fn build_csr_children(
+    tag_types: &[TagType],
+    parents: &[u32],
+    n: usize,
+) -> (Vec<u32>, Vec<u32>) {
+    let mut child_counts = vec![0u32; n + 1];
+    for i in 0..n {
+        let tt = tag_types[i];
+        if tt == TagType::Close || tt == TagType::CData {
+            continue;
+        }
+        let parent = parents[i];
+        if parent != u32::MAX && (parent as usize) < n {
+            child_counts[parent as usize] += 1;
+        }
+    }
+
+    let mut child_offsets = vec![0u32; n + 1];
+    for i in 0..n {
+        child_offsets[i + 1] = child_offsets[i] + child_counts[i];
+    }
+    let total_children = child_offsets[n] as usize;
+    let mut child_data = vec![0u32; total_children];
+
+    let mut write_pos = child_offsets.clone();
+    for i in 0..n {
+        let tt = tag_types[i];
+        if tt == TagType::Close || tt == TagType::CData {
+            continue;
+        }
+        let parent = parents[i];
+        if parent != u32::MAX && (parent as usize) < n {
+            let p = parent as usize;
+            child_data[write_pos[p] as usize] = i as u32;
+            write_pos[p] += 1;
+        }
+    }
+
+    (child_offsets, child_data)
+}
+
+/// Build CSR text child index from text_ranges.
+fn build_csr_text_children(
+    text_ranges: &[TextRange],
+    n: usize,
+) -> (Vec<u32>, Vec<u32>) {
+    let mut text_counts = vec![0u32; n + 1];
+    for range in text_ranges {
+        let parent = range.parent_tag;
+        if parent != u32::MAX && (parent as usize) < n {
+            text_counts[parent as usize] += 1;
+        }
+    }
+
+    let mut text_child_offsets = vec![0u32; n + 1];
+    for i in 0..n {
+        text_child_offsets[i + 1] = text_child_offsets[i] + text_counts[i];
+    }
+    let total_text = text_child_offsets[n] as usize;
+    let mut text_child_data = vec![0u32; total_text];
+
+    let mut text_write_pos = text_child_offsets.clone();
+    for (ti, range) in text_ranges.iter().enumerate() {
+        let parent = range.parent_tag;
+        if parent != u32::MAX && (parent as usize) < n {
+            let p = parent as usize;
+            text_child_data[text_write_pos[p] as usize] = ti as u32;
+            text_write_pos[p] += 1;
+        }
+    }
+
+    (text_child_offsets, text_child_data)
+}
+
+/// Fused close_map + post_order in a single pass over tag_types.
+/// Both need a stack, so we fuse them to halve the iteration cost.
+fn build_close_map_and_post_order(
+    tag_types: &[TagType],
+    n: usize,
+) -> (Vec<u32>, Vec<u32>) {
+    let mut close_map = vec![u32::MAX; n];
+    let mut post_order = vec![0u32; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut post_counter: u32 = 0;
+
+    for i in 0..n {
+        match tag_types[i] {
+            TagType::Open => {
+                stack.push(i);
+            }
+            TagType::Close => {
+                if let Some(open_idx) = stack.pop() {
+                    close_map[open_idx] = i as u32;
+                    post_order[open_idx] = post_counter;
+                }
+                post_order[i] = post_counter;
+                post_counter += 1;
+            }
+            TagType::SelfClose => {
+                close_map[i] = i as u32;
+                post_order[i] = post_counter;
+                post_counter += 1;
+            }
+            TagType::Comment | TagType::PI | TagType::CData => {
+                post_order[i] = post_counter;
+                post_counter += 1;
+            }
+        }
+    }
+
+    (close_map, post_order)
 }
