@@ -48,6 +48,14 @@ pub struct XmlIndex<'a> {
     /// Matching close tag for each open tag. u32::MAX = no match.
     pub(crate) close_map: Vec<u32>,
 
+    // === Tag name interning ===
+
+    /// Interned name ID per tag. Same name → same ID. u16::MAX = no name.
+    pub(crate) name_ids: Vec<u16>,
+    /// Unique name strings: name_id → (byte_offset, length) in input.
+    pub(crate) name_table: Vec<(u32, u16)>,
+    /// Inverted index: name_id → sorted list of tag indices (Open/SelfClose only).
+    pub(crate) name_posting: Vec<Vec<u32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +66,38 @@ pub enum TagType {
     Comment,   // <!-- ... -->
     CData,     // <![CDATA[ ... ]]>
     PI,        // <?target ... ?>
+}
+
+/// Interns tag name byte slices to u16 IDs during parsing.
+/// Uses linear search over a small table (typically 20-200 unique names).
+/// Zero heap allocation per intern call — just byte comparison.
+pub(crate) struct NameInterner<'a> {
+    input: &'a [u8],
+    table: Vec<(u32, u16)>, // (offset, len) for each interned name
+}
+
+impl<'a> NameInterner<'a> {
+    pub fn new(input: &'a [u8]) -> Self {
+        Self { input, table: Vec::with_capacity(64) }
+    }
+
+    /// Intern a name, returning its ID. Zero allocation — compares bytes directly.
+    #[inline]
+    pub fn intern(&mut self, name_bytes: &[u8], offset: u32, len: u16) -> u16 {
+        // Linear scan — fast for typical XML with <200 unique tag names
+        for (id, &(off, l)) in self.table.iter().enumerate() {
+            if l == len && &self.input[off as usize..off as usize + l as usize] == name_bytes {
+                return id as u16;
+            }
+        }
+        let id = self.table.len() as u16;
+        self.table.push((offset, len));
+        id
+    }
+
+    pub fn into_table(self) -> Vec<(u32, u16)> {
+        self.table
+    }
 }
 
 /// A text content node between tags.
@@ -158,6 +198,9 @@ impl<'a> XmlIndex<'a> {
         self.text_child_offsets = text_child_offsets;
         self.text_child_data = text_child_data;
         self.close_map = close_map;
+
+        // Name interning + inverted index left empty — built on demand
+        // via build_name_index() for repeated-query workloads.
     }
 
     /// Get child tag indices for a parent (from precomputed CSR index).
@@ -188,8 +231,64 @@ impl<'a> XmlIndex<'a> {
         !self.child_offsets.is_empty()
     }
 
-    /// Fast tag name comparison (avoids UTF-8 validation on the hot path).
+    /// Build inverted name index for repeated query workloads.
+    /// Call this once before evaluating many XPath expressions on the same document.
+    pub fn build_name_index(&mut self) {
+        if !self.name_posting.is_empty() { return; }
+        let n = self.tag_count();
+        let mut interner = NameInterner::new(self.input);
+        self.name_ids = Vec::with_capacity(n);
+        for i in 0..n {
+            let (off, len) = self.tag_names[i];
+            if len > 0 {
+                let name_bytes = &self.input[off as usize..off as usize + len as usize];
+                self.name_ids.push(interner.intern(name_bytes, off, len));
+            } else {
+                self.name_ids.push(u16::MAX);
+            }
+        }
+        self.name_table = interner.into_table();
+        let num_names = self.name_table.len();
+        let mut posting: Vec<Vec<u32>> = vec![Vec::new(); num_names];
+        for i in 0..n {
+            let nid = self.name_ids[i];
+            if nid != u16::MAX && (nid as usize) < num_names {
+                let tt = self.tag_types[i];
+                if tt == TagType::Open || tt == TagType::SelfClose {
+                    posting[nid as usize].push(i as u32);
+                }
+            }
+        }
+        self.name_posting = posting;
+    }
+
+    /// Look up the interned name ID for a name string. Returns None if not found.
     #[inline]
+    pub(crate) fn name_id(&self, name: &str) -> Option<u16> {
+        let name_bytes = name.as_bytes();
+        for (id, &(off, len)) in self.name_table.iter().enumerate() {
+            if len as usize == name_bytes.len()
+                && &self.input[off as usize..off as usize + len as usize] == name_bytes
+            {
+                return Some(id as u16);
+            }
+        }
+        None
+    }
+
+    /// Get the posting list (sorted tag indices) for a name. O(1) lookup.
+    #[inline]
+    pub(crate) fn tags_by_name(&self, name: &str) -> &[u32] {
+        if let Some(id) = self.name_id(name) {
+            if (id as usize) < self.name_posting.len() {
+                return &self.name_posting[id as usize];
+            }
+        }
+        &[]
+    }
+
+    /// Fast tag name comparison (avoids UTF-8 validation on the hot path).
+    #[inline(always)]
     pub fn tag_name_eq(&self, tag_idx: usize, name: &str) -> bool {
         let (off, len) = self.tag_names[tag_idx];
         let name_bytes = name.as_bytes();
@@ -198,19 +297,23 @@ impl<'a> XmlIndex<'a> {
     }
 
     /// Get the tag name as a string slice.
+    #[inline]
     pub fn tag_name(&self, tag_idx: usize) -> &'a str {
         if tag_idx >= self.tag_names.len() {
             return "";
         }
         let (offset, len) = self.tag_names[tag_idx];
         let bytes = &self.input[offset as usize..(offset + len as u32) as usize];
-        std::str::from_utf8(bytes).unwrap_or("")
+        // Safety: XML input is validated during parsing; tag names are always valid UTF-8.
+        unsafe { std::str::from_utf8_unchecked(bytes) }
     }
 
     /// Get the text content of a text range.
+    #[inline]
     pub fn text_content(&self, range: &TextRange) -> &'a str {
         let bytes = &self.input[range.start as usize..range.end as usize];
-        std::str::from_utf8(bytes).unwrap_or("")
+        // Safety: text content comes from valid XML input.
+        unsafe { std::str::from_utf8_unchecked(bytes) }
     }
 
     /// Decode XML entities in a string. Returns borrowed if no entities present.

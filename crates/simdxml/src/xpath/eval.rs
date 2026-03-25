@@ -262,13 +262,25 @@ fn eval_fused_descendant_child(
 
         match &child_step.node_test {
             NodeTest::Name(name) => {
-                // Single scan with fast byte comparison (no UTF-8 validation)
-                for j in scan_start..scan_end {
-                    let tt = index.tag_types[j];
-                    if (tt == TagType::Open || tt == TagType::SelfClose)
-                        && index.tag_name_eq(j, name)
-                    {
-                        matched.push(XPathNode::Element(j));
+                // Use inverted index if available and scope is full document
+                let posting = index.tags_by_name(name);
+                if !posting.is_empty() && scan_start == 0 && scan_end == index.tag_count() {
+                    // Full document scope — entire posting list qualifies (O(|results|))
+                    matched.extend(posting.iter().map(|&j| XPathNode::Element(j as usize)));
+                } else if !posting.is_empty() {
+                    // Scoped: binary search for range [scan_start, scan_end)
+                    let lo = posting.partition_point(|&j| (j as usize) < scan_start);
+                    let hi = posting.partition_point(|&j| (j as usize) < scan_end);
+                    matched.extend(posting[lo..hi].iter().map(|&j| XPathNode::Element(j as usize)));
+                } else {
+                    // Linear scan fallback (small docs or names not in posting index)
+                    for j in scan_start..scan_end {
+                        let tt = index.tag_types[j];
+                        if (tt == TagType::Open || tt == TagType::SelfClose)
+                            && index.tag_name_eq(j, name)
+                        {
+                            matched.push(XPathNode::Element(j));
+                        }
                     }
                 }
             }
@@ -938,6 +950,7 @@ fn evaluate_in_context(
     }
 }
 
+#[inline]
 fn matches_node_test(index: &XmlIndex, node: XPathNode, test: &NodeTest) -> bool {
     match (node, test) {
         (_, NodeTest::Node) => true,
@@ -1031,6 +1044,7 @@ fn eval_child_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
     result
 }
 
+#[inline(always)]
 fn is_node_tag(tt: TagType) -> bool {
     // CData is not included: its content is already a text range (text node).
     matches!(tt, TagType::Open | TagType::SelfClose | TagType::Comment | TagType::PI)

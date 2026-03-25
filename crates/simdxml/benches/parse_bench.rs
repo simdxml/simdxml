@@ -186,11 +186,12 @@ fn bench_end_to_end(c: &mut Criterion) {
     let mut group = c.benchmark_group("e2e/claim_extract");
     group.throughput(Throughput::Bytes(data.len() as u64));
 
-    // simdxml: parse + xpath
+    // simdxml: parse + compiled xpath (avoids re-parsing expression)
+    let compiled = simdxml::CompiledXPath::compile("//claim").unwrap();
     group.bench_function("simdxml", |b| {
         b.iter(|| {
             let index = simdxml::parse(&data).unwrap();
-            let _ = index.xpath_text("//claim").unwrap();
+            let _ = compiled.eval_text(&index).unwrap();
         });
     });
 

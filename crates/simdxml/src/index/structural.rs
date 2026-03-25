@@ -21,6 +21,9 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
         text_child_offsets: Vec::new(),
         text_child_data: Vec::new(),
         close_map: Vec::new(),
+        name_ids: Vec::new(),
+        name_table: Vec::new(),
+        name_posting: Vec::new(),
     };
 
     let mut pos = 0;
@@ -77,7 +80,7 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                     }
                     parent_stack.pop();
 
-                    let _tag_idx = index.tag_starts.len();
+
                     index.tag_starts.push(tag_start as u32);
                     index.tag_ends.push(pos as u32);
                     index.tag_types.push(TagType::Close);
@@ -85,22 +88,17 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                     index.depths.push(depth);
                     index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
 
-
                     last_tag_end = pos;
                     pos += 1;
                 }
                 b'!' => {
                     if input.get(pos + 2..pos + 4) == Some(b"--") {
                         // Comment: <!-- ... -->
-                        let _tag_idx = index.tag_starts.len();
                         index.tag_starts.push(tag_start as u32);
                         index.tag_types.push(TagType::Comment);
                         index.tag_names.push((0, 0));
                         index.depths.push(depth);
-    
-                        index
-                            .parents
-                            .push(parent_stack.last().copied().unwrap_or(u32::MAX));
+                        index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
 
                         pos += 4;
                         while pos + 2 < input.len() {
@@ -115,16 +113,11 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                         pos += 1;
                     } else if input.get(pos + 2..pos + 9) == Some(b"[CDATA[") {
                         // CDATA: <![CDATA[ ... ]]>
-                        let _tag_idx = index.tag_starts.len();
-                        let _cdata_content_start = pos + 9;
                         index.tag_starts.push(tag_start as u32);
                         index.tag_types.push(TagType::CData);
                         index.tag_names.push((0, 0));
                         index.depths.push(depth);
-    
-                        index
-                            .parents
-                            .push(parent_stack.last().copied().unwrap_or(u32::MAX));
+                        index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
 
                         pos += 9;
                         let content_start = pos;
@@ -170,14 +163,12 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                     }
                     let name_end = pos;
 
+
                     index.tag_starts.push(tag_start as u32);
                     index.tag_types.push(TagType::PI);
                     index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
                     index.depths.push(depth);
-
-                    index
-                        .parents
-                        .push(parent_stack.last().copied().unwrap_or(u32::MAX));
+                    index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
 
                     // Skip to ?>
                     while pos + 1 < input.len() {
@@ -238,6 +229,7 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
 
                     let tag_idx = index.tag_starts.len() as u32;
                     let parent = parent_stack.last().copied().unwrap_or(u32::MAX);
+
 
                     index.tag_starts.push(tag_start as u32);
                     index.tag_ends.push(pos as u32);
