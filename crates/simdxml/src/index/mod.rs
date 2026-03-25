@@ -135,6 +135,13 @@ pub struct TextRange {
 }
 
 impl<'a> XmlIndex<'a> {
+    /// Ensure precomputed indices are built. No-op if already built.
+    pub fn ensure_indices(&mut self) {
+        if !self.has_indices() && self.tag_count() >= 1 {
+            self.build_indices();
+        }
+    }
+
     /// Build precomputed indices for fast XPath evaluation.
     /// Called once after structural parsing. O(n) time, flat memory layout.
     pub(crate) fn build_indices(&mut self) {

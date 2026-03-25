@@ -685,23 +685,34 @@ fn bench_parallel(c: &mut Criterion) {
     let mut group = c.benchmark_group("parallel");
     group.throughput(Throughput::Bytes(data.len() as u64));
 
+    // Sequential baseline (with build_indices)
     group.bench_function("sequential", |b| {
         b.iter(|| {
             let _ = simdxml::parse(&data).unwrap();
         });
     });
 
+    // Parallel parse only (no build_indices — measures pure parse speedup)
     for threads in [2, 4, 8] {
-        group.bench_function(format!("parallel_{}t", threads), |b| {
+        group.bench_function(format!("parse_only_{}t", threads), |b| {
             b.iter(|| {
                 let _ = simdxml::parallel::parse_parallel(&data, threads).unwrap();
             });
         });
     }
 
-    // Also bench on the large file (1MB) for comparison
+    // Parallel parse + build_indices (apples-to-apples with sequential)
+    for threads in [2, 4, 8] {
+        group.bench_function(format!("indexed_{}t", threads), |b| {
+            b.iter(|| {
+                let _ = simdxml::parallel::parse_parallel_indexed(&data, threads).unwrap();
+            });
+        });
+    }
+
     group.finish();
 
+    // 1MB comparison
     let data_large = load("patent_large.xml");
     let mut group2 = c.benchmark_group("parallel_1mb");
     group2.throughput(Throughput::Bytes(data_large.len() as u64));
@@ -713,7 +724,7 @@ fn bench_parallel(c: &mut Criterion) {
     });
 
     for threads in [2, 4] {
-        group2.bench_function(format!("parallel_{}t", threads), |b| {
+        group2.bench_function(format!("parse_only_{}t", threads), |b| {
             b.iter(|| {
                 let _ = simdxml::parallel::parse_parallel(&data_large, threads).unwrap();
             });

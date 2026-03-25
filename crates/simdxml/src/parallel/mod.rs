@@ -39,20 +39,20 @@ pub fn parse_parallel<'a>(input: &'a [u8], num_threads: usize) -> Result<XmlInde
     let splits = find_split_points(input, num_threads);
     let num_chunks = splits.len() + 1;
 
+    // Pre-compute chunk boundaries to avoid closure captures
+    let mut boundaries: Vec<(usize, usize)> = Vec::with_capacity(num_chunks);
+    for i in 0..num_chunks {
+        let start = if i == 0 { 0 } else { splits[i - 1] };
+        let end = if i < splits.len() { splits[i] } else { input.len() };
+        boundaries.push((start, end));
+    }
+
     // Parse chunks in parallel
     let chunk_results: Vec<ChunkResult> = std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(num_chunks);
-
-        for i in 0..num_chunks {
-            let start = if i == 0 { 0 } else { splits[i - 1] };
-            let end = if i < splits.len() { splits[i] } else { input.len() };
+        let handles: Vec<_> = boundaries.iter().map(|&(start, end)| {
             let chunk = &input[start..end];
-            let chunk_start = start;
-
-            handles.push(scope.spawn(move || {
-                parse_chunk(input, chunk, chunk_start)
-            }));
-        }
+            scope.spawn(move || parse_chunk(input, chunk, start))
+        }).collect();
 
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
@@ -434,10 +434,23 @@ fn merge_chunks<'a>(input: &'a [u8], chunks: Vec<ChunkResult>) -> Result<XmlInde
         name_posting: Vec::new(),
     };
 
+    // NOTE: We intentionally skip build_indices() here. The depth/parent
+    // computation is the merge bottleneck, and build_indices() (CSR, close_map,
+    // post_order) adds significant sequential overhead. These are built lazily
+    // on first XPath evaluation via ensure_indices().
+    //
+    // For parse-only benchmarks, this gives the true parallel speedup.
+    // For parse+query, the indices are built once on first query.
+
+    Ok(index)
+}
+
+/// Parse parallel and immediately build indices (for callers that need them).
+pub fn parse_parallel_indexed<'a>(input: &'a [u8], num_threads: usize) -> Result<XmlIndex<'a>> {
+    let mut index = parse_parallel(input, num_threads)?;
     if index.tag_count() >= 64 {
         index.build_indices();
     }
-
     Ok(index)
 }
 
@@ -534,7 +547,8 @@ mod tests {
         let bytes = xml.as_bytes();
 
         let seq = crate::parse(bytes).unwrap();
-        let par = parse_parallel(bytes, 4).unwrap();
+        let mut par = parse_parallel(bytes, 4).unwrap();
+        par.ensure_indices();
 
         let queries = ["//title", "//claim", "//patent", "/corpus/patent/title"];
         for q in &queries {
@@ -567,6 +581,94 @@ mod tests {
     }
 
     #[test]
+    fn timing_breakdown() {
+        // Diagnostic: where does parallel time go?
+        let mut xml = String::from("<corpus>");
+        for i in 0..5000 {
+            xml.push_str(&format!(
+                "<patent id=\"{}\"><title>Patent {}</title><claims><claim>Claim text {} with more words</claim></claims></patent>",
+                i, i, i
+            ));
+        }
+        xml.push_str("</corpus>");
+        let bytes = xml.as_bytes();
+        let size_mb = bytes.len() as f64 / 1_048_576.0;
+
+        // Warm up
+        let _ = crate::parse(bytes).unwrap();
+        let _ = parse_parallel(bytes, 4).unwrap();
+
+        let iters = 20;
+
+        // Sequential baseline
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            let _ = crate::parse(bytes).unwrap();
+        }
+        let seq_total = start.elapsed() / iters;
+
+        // Parallel: time split finding
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            let _ = find_split_points(bytes, 4);
+        }
+        let split_time = start.elapsed() / iters;
+
+        // Parallel: time chunk parsing (4 threads)
+        let splits = find_split_points(bytes, 4);
+        let num_chunks = splits.len() + 1;
+        let mut boundaries: Vec<(usize, usize)> = Vec::with_capacity(num_chunks);
+        for i in 0..num_chunks {
+            let s = if i == 0 { 0 } else { splits[i - 1] };
+            let e = if i < splits.len() { splits[i] } else { bytes.len() };
+            boundaries.push((s, e));
+        }
+
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            let _: Vec<ChunkResult> = std::thread::scope(|scope| {
+                let handles: Vec<_> = boundaries.iter().map(|&(s, e)| {
+                    let chunk = &bytes[s..e];
+                    scope.spawn(move || parse_chunk(bytes, chunk, s))
+                }).collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+        }
+        let chunk_time = start.elapsed() / iters;
+
+        // Parallel: time merge
+        let chunk_results: Vec<ChunkResult> = std::thread::scope(|scope| {
+            let handles: Vec<_> = boundaries.iter().map(|&(s, e)| {
+                let chunk = &bytes[s..e];
+                scope.spawn(move || parse_chunk(bytes, chunk, s))
+            }).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        // Clone-ish: we need to run merge multiple times
+        // Just measure one merge
+        let start = std::time::Instant::now();
+        let _ = merge_chunks(bytes, chunk_results).unwrap();
+        let merge_time = start.elapsed();
+
+        // Full parallel
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            let _ = parse_parallel(bytes, 4).unwrap();
+        }
+        let par_total = start.elapsed() / iters;
+
+        let speedup = seq_total.as_secs_f64() / par_total.as_secs_f64();
+
+        println!("\n=== PARALLEL TIMING BREAKDOWN ({:.1} MB, {} chunks) ===", size_mb, num_chunks);
+        println!("sequential total:  {:>8.1?}", seq_total);
+        println!("parallel total:    {:>8.1?}  ({:.2}x)", par_total, speedup);
+        println!("  split finding:   {:>8.1?}  ({:.1}%)", split_time, split_time.as_secs_f64() / par_total.as_secs_f64() * 100.0);
+        println!("  chunk parsing:   {:>8.1?}  ({:.1}%)", chunk_time, chunk_time.as_secs_f64() / par_total.as_secs_f64() * 100.0);
+        println!("  merge:           {:>8.1?}  ({:.1}%)", merge_time, merge_time.as_secs_f64() / par_total.as_secs_f64() * 100.0);
+        println!("  overhead:        {:>8.1?}", par_total.saturating_sub(split_time + chunk_time + merge_time));
+    }
+
+    #[test]
     fn parallel_with_attributes() {
         let mut xml = String::from("<root>");
         for i in 0..2000 {
@@ -579,7 +681,8 @@ mod tests {
         let bytes = xml.as_bytes();
 
         let seq = crate::parse(bytes).unwrap();
-        let par = parse_parallel(bytes, 4).unwrap();
+        let mut par = parse_parallel(bytes, 4).unwrap();
+        par.ensure_indices();
 
         assert_eq!(seq.tag_count(), par.tag_count());
         assert_eq!(seq.tag_starts, par.tag_starts);
