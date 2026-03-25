@@ -198,7 +198,7 @@ fn test_libxml2_conformance_full() {
         let (p, t, f) = run_document_tests(doc, tests);
         println!("  {}: {}/{}", tests, p, t);
         total_passed += p; total_tests += t;
-        for fl in &f { eprintln!("  [{}] {}", tests, fl); } for fl in f { all_failures.push(format!("[{}] {}", tests, fl)); }
+        for fl in f { println!("    {}", fl); all_failures.push(format!("[{}] {}", tests, fl)); }
     }
 
     println!("\n=== EXPRESSION TESTS ===");
@@ -206,7 +206,7 @@ fn test_libxml2_conformance_full() {
         let (p, t, f) = run_expression_tests(test_name);
         println!("  {}: {}/{}", test_name, p, t);
         total_passed += p; total_tests += t;
-        for fl in &f { eprintln!("  [expr:{}] {}", test_name, fl); } for fl in f { all_failures.push(format!("[expr:{}] {}", test_name, fl)); }
+        for fl in f { println!("    {}", fl); all_failures.push(format!("[expr:{}] {}", test_name, fl)); }
     }
 
     let pct = (total_passed as f64 / total_tests.max(1) as f64) * 100.0;

@@ -108,16 +108,11 @@ fn eval_location_path<'a>(
     path: &LocationPath,
 ) -> Result<Vec<XPathNode>> {
     let mut context: Vec<XPathNode> = if path.absolute {
-        // Virtual document root — child axis returns depth-0 elements
         vec![XPathNode::Element(DOC_ROOT)]
     } else {
-        // Relative path: needs a context node. When called from evaluate()
-        // (top-level), use DOC_ROOT. When called from evaluate_in_context(),
-        // the context is set by the caller.
-        // This flag is set by evaluate_in_context.
-        return Err(SimdXmlError::XPathEvalError(
-            "Relative path needs context (use evaluate_in_context)".into(),
-        ));
+        // Relative path at top level: evaluate from document root's children
+        // (XPath spec: context node is the root node of the document)
+        vec![XPathNode::Element(DOC_ROOT)]
     };
 
     for step in &path.steps {
@@ -196,11 +191,16 @@ fn apply_predicate<'a>(
     match pred {
         // Numeric predicate: [1] means position() = 1
         XPathExpr::NumberLiteral(n) => {
-            let pos = *n as usize;
-            if pos >= 1 && pos <= nodes.len() {
-                Ok(vec![nodes[pos - 1]])
-            } else {
+            let n = n.round();
+            if n.is_nan() || n.is_infinite() || n < 1.0 || n > nodes.len() as f64 {
                 Ok(vec![])
+            } else {
+                let pos = n as usize;
+                if pos >= 1 && pos <= nodes.len() {
+                    Ok(vec![nodes[pos - 1]])
+                } else {
+                    Ok(vec![])
+                }
             }
         }
 
@@ -425,15 +425,57 @@ fn eval_function(
             Ok(XPathValue::String(result))
         }
         "substring" => {
+            // XPath substring(string, startPos [, length])
+            // Positions are 1-indexed, round() is applied to startPos and length.
+            // The returned string is chars from position round(startPos) to
+            // round(startPos) + round(length) - 1.
             if args.len() >= 2 {
                 let s = eval_predicate_value(index, node, &args[0], position, size)?.as_string();
-                let start = eval_predicate_value(index, node, &args[1], position, size)?.as_number() as usize;
-                let start = start.saturating_sub(1); // XPath is 1-indexed
+                let start_raw = eval_predicate_value(index, node, &args[1], position, size)?.as_number();
+
+                if start_raw.is_nan() {
+                    return Ok(XPathValue::String(String::new()));
+                }
+
+                let chars: Vec<char> = s.chars().collect();
+
                 if args.len() >= 3 {
-                    let len = eval_predicate_value(index, node, &args[2], position, size)?.as_number() as usize;
-                    Ok(XPathValue::String(s.chars().skip(start).take(len).collect()))
+                    let len_raw = eval_predicate_value(index, node, &args[2], position, size)?.as_number();
+
+                    if len_raw.is_nan() || len_raw == f64::NEG_INFINITY {
+                        return Ok(XPathValue::String(String::new()));
+                    }
+
+                    // XPath: substring(s, p, n) returns chars at positions
+                    // where position >= round(p) and position < round(p) + round(n)
+                    let p = start_raw.round();
+                    let n = len_raw.round();
+                    let end = p + n;
+
+                    if end == f64::NEG_INFINITY || p == f64::INFINITY {
+                        return Ok(XPathValue::String(String::new()));
+                    }
+
+                    let start_idx = (p.max(1.0) as i64 - 1).max(0) as usize;
+                    let end_idx = if end.is_infinite() {
+                        chars.len()
+                    } else {
+                        ((end as i64 - 1).max(0) as usize).min(chars.len())
+                    };
+
+                    if start_idx >= end_idx || start_idx >= chars.len() {
+                        Ok(XPathValue::String(String::new()))
+                    } else {
+                        Ok(XPathValue::String(chars[start_idx..end_idx].iter().collect()))
+                    }
                 } else {
-                    Ok(XPathValue::String(s.chars().skip(start).collect()))
+                    // No length — from start to end
+                    let start_idx = (start_raw.round().max(1.0) as i64 - 1).max(0) as usize;
+                    if start_idx >= chars.len() {
+                        Ok(XPathValue::String(String::new()))
+                    } else {
+                        Ok(XPathValue::String(chars[start_idx..].iter().collect()))
+                    }
                 }
             } else {
                 Ok(XPathValue::String(String::new()))
@@ -530,13 +572,18 @@ fn eval_function(
 fn compare_values(left: &XPathValue, op: &BinaryOp, right: &XPathValue) -> bool {
     match op {
         BinaryOp::Eq => {
-            // XPath equality: compare as numbers if both are numeric, else as strings
+            // XPath equality: NaN != NaN (IEEE 754)
             let ln = left.as_number();
             let rn = right.as_number();
-            if !ln.is_nan() && !rn.is_nan() {
-                ln == rn
+            if ln.is_nan() || rn.is_nan() {
+                // NaN is never equal to anything, even itself
+                // But compare as strings if they're string-typed
+                match (left, right) {
+                    (XPathValue::String(a), XPathValue::String(b)) => a == b,
+                    _ => false,
+                }
             } else {
-                left.as_string() == right.as_string()
+                ln == rn
             }
         }
         BinaryOp::Neq => !compare_values(left, &BinaryOp::Eq, right),
@@ -823,7 +870,8 @@ fn eval_preceding_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
         a
     };
 
-    for i in (0..idx).rev() {
+    // Collect in document order (forward), not reverse
+    for i in 0..idx {
         if (index.tag_types[i] == TagType::Open || index.tag_types[i] == TagType::SelfClose)
             && !ancestors.contains(&(i as u32))
         {
