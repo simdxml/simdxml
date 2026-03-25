@@ -7,15 +7,20 @@ use memchr::memchr;
 /// characters, with sequential processing for tag classification and index building.
 /// Phase 2 replaces this with SIMD for the structural character detection.
 pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
+    // Estimate tag count: ~1 tag per 100-200 bytes for typical XML.
+    // Pre-allocating avoids repeated Vec reallocation during parsing.
+    let est_tags = input.len() / 128;
+    let est_text = est_tags / 2;
+
     let mut index = XmlIndex {
         input,
-        tag_starts: Vec::new(),
-        tag_ends: Vec::new(),
-        tag_types: Vec::new(),
-        tag_names: Vec::new(),
-        depths: Vec::new(),
-        parents: Vec::new(),
-        text_ranges: Vec::new(),
+        tag_starts: Vec::with_capacity(est_tags),
+        tag_ends: Vec::with_capacity(est_tags),
+        tag_types: Vec::with_capacity(est_tags),
+        tag_names: Vec::with_capacity(est_tags),
+        depths: Vec::with_capacity(est_tags),
+        parents: Vec::with_capacity(est_tags),
+        text_ranges: Vec::with_capacity(est_text),
         child_offsets: Vec::new(),
         child_data: Vec::new(),
         text_child_offsets: Vec::new(),
@@ -261,16 +266,18 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
 /// Stage 2 walks the bitmasks to build the structural index.
 pub fn parse_two_stage<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
     let structural = crate::simd::classify_structural(input);
+    let est_tags = input.len() / 128;
+    let est_text = est_tags / 2;
 
     let mut index = XmlIndex {
         input,
-        tag_starts: Vec::new(),
-        tag_ends: Vec::new(),
-        tag_types: Vec::new(),
-        tag_names: Vec::new(),
-        depths: Vec::new(),
-        parents: Vec::new(),
-        text_ranges: Vec::new(),
+        tag_starts: Vec::with_capacity(est_tags),
+        tag_ends: Vec::with_capacity(est_tags),
+        tag_types: Vec::with_capacity(est_tags),
+        tag_names: Vec::with_capacity(est_tags),
+        depths: Vec::with_capacity(est_tags),
+        parents: Vec::with_capacity(est_tags),
+        text_ranges: Vec::with_capacity(est_text),
         child_offsets: Vec::new(),
         child_data: Vec::new(),
         text_child_offsets: Vec::new(),

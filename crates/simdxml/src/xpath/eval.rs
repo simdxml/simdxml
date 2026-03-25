@@ -160,11 +160,24 @@ pub fn eval_text<'a>(
     for node in nodes {
         match node {
             XPathNode::Element(idx) => {
-                // Use direct_text for elements (uses CSR when available).
-                // For recursive text, callers should use all_text() separately.
-                for t in index.direct_text(idx) {
-                    if !t.is_empty() {
-                        results.push(t);
+                // Inline CSR text iteration — zero allocation per element
+                let text_slice = index.child_text_slice(idx);
+                if !text_slice.is_empty() {
+                    for &ti in text_slice {
+                        let text = index.text_content(&index.text_ranges[ti as usize]);
+                        if !text.is_empty() {
+                            results.push(text);
+                        }
+                    }
+                } else {
+                    // Fallback for small docs without CSR
+                    for range in &index.text_ranges {
+                        if range.parent_tag == idx as u32 {
+                            let text = index.text_content(range);
+                            if !text.is_empty() {
+                                results.push(text);
+                            }
+                        }
                     }
                 }
             }
@@ -258,39 +271,33 @@ fn eval_fused_descendant_child(
             _ => continue,
         };
 
-        // Single scan: find all matching nodes within scope
-        let mut matched: Vec<XPathNode> = Vec::new();
-
+        // Single scan: push directly to result (no predicates in fused path)
         match &child_step.node_test {
             NodeTest::Name(name) => {
                 // Use inverted index if available and scope is full document
                 let posting = index.tags_by_name(name);
                 if !posting.is_empty() && scan_start == 0 && scan_end == index.tag_count() {
-                    // Full document scope — entire posting list qualifies (O(|results|))
-                    matched.extend(posting.iter().map(|&j| XPathNode::Element(j as usize)));
+                    result.extend(posting.iter().map(|&j| XPathNode::Element(j as usize)));
                 } else if !posting.is_empty() {
-                    // Scoped: binary search for range [scan_start, scan_end)
                     let lo = posting.partition_point(|&j| (j as usize) < scan_start);
                     let hi = posting.partition_point(|&j| (j as usize) < scan_end);
-                    matched.extend(posting[lo..hi].iter().map(|&j| XPathNode::Element(j as usize)));
+                    result.extend(posting[lo..hi].iter().map(|&j| XPathNode::Element(j as usize)));
                 } else {
-                    // Linear scan fallback (small docs or names not in posting index)
                     for j in scan_start..scan_end {
                         let tt = index.tag_types[j];
                         if (tt == TagType::Open || tt == TagType::SelfClose)
                             && index.tag_name_eq(j, name)
                         {
-                            matched.push(XPathNode::Element(j));
+                            result.push(XPathNode::Element(j));
                         }
                     }
                 }
             }
             NodeTest::Text => {
-                // All text nodes within scope
                 for (ti, range) in index.text_ranges.iter().enumerate() {
                     let p = range.parent_tag as usize;
                     if p >= scan_start && p < scan_end {
-                        matched.push(XPathNode::Text(ti));
+                        result.push(XPathNode::Text(ti));
                     }
                 }
             }
@@ -298,55 +305,49 @@ fn eval_fused_descendant_child(
                 for j in scan_start..scan_end {
                     let tt = index.tag_types[j];
                     if tt == TagType::Open || tt == TagType::SelfClose {
-                        matched.push(XPathNode::Element(j));
+                        result.push(XPathNode::Element(j));
                     }
                 }
             }
             NodeTest::Node => {
-                // All nodes within scope
                 for j in scan_start..scan_end {
                     if is_node_tag(index.tag_types[j]) {
-                        matched.push(XPathNode::Element(j));
+                        result.push(XPathNode::Element(j));
                     }
                 }
                 for (ti, range) in index.text_ranges.iter().enumerate() {
                     let p = range.parent_tag as usize;
                     if p >= scan_start && p < scan_end {
-                        matched.push(XPathNode::Text(ti));
+                        result.push(XPathNode::Text(ti));
                     }
                 }
             }
             NodeTest::Comment => {
                 for j in scan_start..scan_end {
                     if index.tag_types[j] == TagType::Comment {
-                        matched.push(XPathNode::Element(j));
+                        result.push(XPathNode::Element(j));
                     }
                 }
             }
             _ => {
-                // Fallback: use unfused path
                 let desc = eval_descendant_axis(index, ctx_node, true);
                 for dn in desc {
                     let children = eval_child_axis(index, dn);
                     for c in children {
                         if matches_node_test(index, c, &child_step.node_test) {
-                            matched.push(c);
+                            result.push(c);
                         }
                     }
                 }
             }
         }
-
-        // Apply predicates per-context-node
-        for pred in &child_step.predicates {
-            matched = apply_predicate(index, &matched, pred)?;
-        }
-
-        result.extend(matched);
     }
 
-    dedup_nodes(&mut result);
-    sort_doc_order(index, &mut result);
+    // Fused path produces results in document order; dedup only needed for multi-context
+    if context.len() > 1 {
+        dedup_nodes(&mut result);
+        sort_doc_order(index, &mut result);
+    }
     Ok(result)
 }
 
