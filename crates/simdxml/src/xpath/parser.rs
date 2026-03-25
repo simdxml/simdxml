@@ -370,12 +370,19 @@ fn comparison_op(input: &str) -> IResult<&str, BinaryOp> {
 fn primary_expr(input: &str) -> IResult<&str, XPathExpr> {
     let (input, _) = multispace0(input)?;
     alt((
-        parenthesized_pred_expr,
+        unary_minus_expr,
         function_call_expr,
+        parenthesized_pred_expr,
         string_literal_expr,
         number_literal_expr,
         nested_path_expr,
     ))(input)
+}
+
+fn unary_minus_expr(input: &str) -> IResult<&str, XPathExpr> {
+    let (input, _) = char('-')(input)?;
+    let (input, expr) = primary_expr(input)?;
+    Ok((input, XPathExpr::UnaryMinus(Box::new(expr))))
 }
 
 fn parenthesized_pred_expr(input: &str) -> IResult<&str, XPathExpr> {
@@ -437,12 +444,16 @@ fn double_quoted_string(input: &str) -> IResult<&str, XPathExpr> {
 }
 
 fn number_literal_expr(input: &str) -> IResult<&str, XPathExpr> {
-    // Handle negative numbers
-    let (input, neg) = opt(char('-'))(input)?;
+    let (input, num_str) = take_while1(|c: char| c.is_ascii_digit() || c == '.')(input)?;
 
-    let (input, num_str) = take_while1(|c: char| c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')(input)?;
-
-    // Don't consume if it looks like a name (e.g., "div")
+    // Must contain at least one digit (reject standalone "." which is self-axis)
+    if !num_str.chars().any(|c| c.is_ascii_digit()) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Float,
+        )));
+    }
+    // Don't consume if it looks like a name
     if num_str.chars().next().map_or(true, |c| !c.is_ascii_digit() && c != '.') {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -450,13 +461,16 @@ fn number_literal_expr(input: &str) -> IResult<&str, XPathExpr> {
         )));
     }
 
-    let full = if neg.is_some() {
-        format!("-{}", num_str)
+    // Check for scientific notation suffix
+    let (input, num_str) = if input.starts_with('e') || input.starts_with('E') {
+        let (rest, exp) = take_while1(|c: char| c.is_ascii_digit() || c == 'e' || c == 'E' || c == '+' || c == '-')(input)?;
+        let full = format!("{}{}", num_str, exp);
+        (rest, full)
     } else {
-        num_str.to_string()
+        (input, num_str.to_string())
     };
 
-    let num: f64 = full.parse().unwrap_or(f64::NAN);
+    let num: f64 = num_str.parse().unwrap_or(f64::NAN);
     Ok((input, XPathExpr::NumberLiteral(num)))
 }
 

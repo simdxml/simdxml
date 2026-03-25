@@ -111,9 +111,13 @@ fn eval_location_path<'a>(
         // Virtual document root — child axis returns depth-0 elements
         vec![XPathNode::Element(DOC_ROOT)]
     } else {
-        // Relative path without explicit context: evaluate from document root
-        // (libxml2 uses the root element as default context for relative paths)
-        vec![XPathNode::Element(DOC_ROOT)]
+        // Relative path: needs a context node. When called from evaluate()
+        // (top-level), use DOC_ROOT. When called from evaluate_in_context(),
+        // the context is set by the caller.
+        // This flag is set by evaluate_in_context.
+        return Err(SimdXmlError::XPathEvalError(
+            "Relative path needs context (use evaluate_in_context)".into(),
+        ));
     };
 
     for step in &path.steps {
@@ -306,6 +310,10 @@ fn eval_predicate_value(
             } else {
                 Ok(XPathValue::String(String::new()))
             }
+        }
+        XPathExpr::UnaryMinus(inner) => {
+            let val = eval_predicate_value(index, node, inner, position, size)?;
+            Ok(XPathValue::Number(-val.as_number()))
         }
         XPathExpr::BinaryOp(left, op, right) => {
             let l = eval_predicate_value(index, node, left, position, size)?;
