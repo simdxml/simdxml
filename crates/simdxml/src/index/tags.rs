@@ -6,32 +6,35 @@ use crate::index::XmlIndex;
 impl<'a> XmlIndex<'a> {
     /// Extract an attribute value from a tag by attribute name.
     /// Zero-allocation: searches raw bytes directly with memchr.
+    #[inline]
     pub fn get_attribute(&self, tag_idx: usize, attr_name: &str) -> Option<&'a str> {
         let start = self.tag_starts[tag_idx] as usize;
         let end = self.tag_ends[tag_idx] as usize;
         let tag_bytes = &self.input[start..=end];
         let name = attr_name.as_bytes();
+        if name.is_empty() { return None; }
+        let first = name[0];
 
-        // Scan for attr_name= pattern in tag bytes (no allocation)
+        // SIMD-accelerated: use memchr to jump to first byte of attr name
         let mut pos = 0;
-        while pos + name.len() + 1 < tag_bytes.len() {
-            // Find potential attribute name match
-            if tag_bytes[pos..].starts_with(name)
-                && tag_bytes.get(pos + name.len()) == Some(&b'=')
+        while let Some(off) = memchr::memchr(first, &tag_bytes[pos..]) {
+            pos += off;
+            if pos + name.len() + 1 >= tag_bytes.len() { break; }
+
+            // Check full name match + '=' suffix + whitespace boundary
+            if &tag_bytes[pos..pos + name.len()] == name
+                && tag_bytes[pos + name.len()] == b'='
+                && (pos == 0 || tag_bytes[pos - 1].is_ascii_whitespace())
             {
-                // Verify it's a real attribute boundary (preceded by whitespace or tag start)
-                if pos == 0 || tag_bytes[pos - 1].is_ascii_whitespace() {
-                    let val_start = pos + name.len() + 1;
-                    if val_start < tag_bytes.len() {
-                        let quote = tag_bytes[val_start];
-                        if quote == b'"' || quote == b'\'' {
-                            let content_start = val_start + 1;
-                            if let Some(off) = memchr::memchr(quote, &tag_bytes[content_start..]) {
-                                let abs_start = start + content_start;
-                                let abs_end = abs_start + off;
-                                return std::str::from_utf8(&self.input[abs_start..abs_end]).ok();
-                            }
-                        }
+                let val_start = pos + name.len() + 1;
+                let quote = tag_bytes[val_start];
+                if quote == b'"' || quote == b'\'' {
+                    let content_start = val_start + 1;
+                    if let Some(qoff) = memchr::memchr(quote, &tag_bytes[content_start..]) {
+                        let abs_start = start + content_start;
+                        return Some(unsafe {
+                            std::str::from_utf8_unchecked(&self.input[abs_start..abs_start + qoff])
+                        });
                     }
                 }
             }

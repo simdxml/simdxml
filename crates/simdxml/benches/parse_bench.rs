@@ -243,6 +243,87 @@ fn bench_end_to_end(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Multi-query: parse once, query many (DuckDB extension pattern)
+// ============================================================================
+
+fn bench_multi_query(c: &mut Criterion) {
+    let data = load("patent_large.xml");
+    let data_str = std::str::from_utf8(&data).unwrap();
+
+    let queries = [
+        "//title",
+        "//claim[@type='independent']",
+        "//citation/ref",
+    ];
+
+    let compiled: Vec<_> = queries.iter()
+        .map(|q| simdxml::CompiledXPath::compile(q).unwrap())
+        .collect();
+
+    let mut group = c.benchmark_group("multi_query");
+    group.throughput(Throughput::Bytes(data.len() as u64));
+
+    // simdxml: parse once, query 3 times
+    group.bench_function("simdxml_3queries", |b| {
+        b.iter(|| {
+            let index = simdxml::parse(&data).unwrap();
+            for q in &compiled {
+                let _ = q.eval(&index).unwrap();
+            }
+        });
+    });
+
+    // simdxml: parse once + build name index, query 3 times
+    group.bench_function("simdxml_3q_indexed", |b| {
+        b.iter(|| {
+            let mut index = simdxml::parse(&data).unwrap();
+            index.build_name_index();
+            for q in &compiled {
+                let _ = q.eval(&index).unwrap();
+            }
+        });
+    });
+
+    // quick-xml: must re-scan for each query (3 full passes)
+    group.bench_function("quick_xml_3passes", |b| {
+        b.iter(|| {
+            let targets: [&[u8]; 3] = [b"title", b"claim", b"ref"];
+            let mut results: Vec<Vec<String>> = vec![Vec::new(); 3];
+            for (qi, target) in targets.iter().enumerate() {
+                let mut reader = quick_xml::Reader::from_str(data_str);
+                let mut inside = false;
+                let mut buf = String::new();
+                loop {
+                    match reader.read_event() {
+                        Ok(quick_xml::events::Event::Start(e))
+                            if e.name().as_ref() == *target =>
+                        {
+                            inside = true;
+                            buf.clear();
+                        }
+                        Ok(quick_xml::events::Event::Text(e)) if inside => {
+                            buf.push_str(&e.unescape().unwrap());
+                        }
+                        Ok(quick_xml::events::Event::End(e))
+                            if e.name().as_ref() == *target =>
+                        {
+                            inside = false;
+                            results[qi].push(std::mem::take(&mut buf));
+                        }
+                        Ok(quick_xml::events::Event::Eof) => break,
+                        Ok(_) => {}
+                        Err(e) => panic!("{}", e),
+                    }
+                }
+            }
+            results
+        });
+    });
+
+    group.finish();
+}
+
+// ============================================================================
 // Real-world XML files (from roxmltree + community benchmarks)
 // ============================================================================
 
@@ -307,6 +388,7 @@ criterion_group!(
     bench_parse_scaling,
     bench_xpath,
     bench_end_to_end,
+    bench_multi_query,
     bench_realworld,
 );
 criterion_main!(benches);
