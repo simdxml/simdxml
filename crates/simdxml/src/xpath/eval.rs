@@ -415,37 +415,30 @@ fn eval_fused_descendant_child_with_preds(
             }
         }
 
-        // Group by parent, apply predicates per group
+        // Group by parent, apply predicates per group.
         // (XPath //p[1] means "first p child of EACH parent")
-        let mut group_start = 0;
-        while group_start < all_matches.len() {
-            let parent = match all_matches[group_start] {
-                XPathNode::Element(idx) => index.parents[idx],
+        // Must handle non-consecutive same-parent elements (e.g., <a><p/><b><p/></b><p/></a>
+        // where the first and third <p/> share parent <a> but aren't adjacent in scan order).
+        let mut parent_groups: std::collections::HashMap<u32, Vec<XPathNode>> =
+            std::collections::HashMap::new();
+        for &m in &all_matches {
+            let parent = match m {
+                XPathNode::Element(idx) if idx < index.tag_count() => index.parents[idx],
                 _ => u32::MAX,
             };
-            let mut group_end = group_start + 1;
-            while group_end < all_matches.len() {
-                let p = match all_matches[group_end] {
-                    XPathNode::Element(idx) => index.parents[idx],
-                    _ => u32::MAX,
-                };
-                if p != parent { break; }
-                group_end += 1;
-            }
-            // Apply predicates to this group
-            let mut group = all_matches[group_start..group_end].to_vec();
+            parent_groups.entry(parent).or_default().push(m);
+        }
+        for (_parent, mut group) in parent_groups {
             for pred in &child_step.predicates {
                 group = apply_predicate(index, &group, pred)?;
             }
             result.extend(group);
-            group_start = group_end;
         }
     }
 
-    if context.len() > 1 {
-        dedup_nodes(&mut result);
-        sort_doc_order(index, &mut result);
-    }
+    // Always sort — HashMap grouping doesn't preserve document order
+    dedup_nodes(&mut result);
+    sort_doc_order(index, &mut result);
     Ok(result)
 }
 
@@ -537,10 +530,10 @@ fn apply_predicate<'a>(
     pred: &XPathExpr,
 ) -> Result<Vec<XPathNode>> {
     match pred {
-        // Numeric predicate: [1] means position() = 1
+        // Numeric predicate: [N] is true when position() == N (exact equality)
         XPathExpr::NumberLiteral(n) => {
-            let n = n.round();
-            if n.is_nan() || n.is_infinite() || n < 1.0 || n > nodes.len() as f64 {
+            let n = *n;
+            if n.is_nan() || n.is_infinite() || n < 1.0 || n > nodes.len() as f64 || n != n.trunc() {
                 Ok(vec![])
             } else {
                 let pos = n as usize;
@@ -612,9 +605,9 @@ fn apply_predicate<'a>(
                 let val = eval_function(index, node, name, args, i + 1, nodes.len())?;
                 let keep = match &val {
                     XPathValue::Number(n) => {
-                        // Numeric predicate: position() == round(n)
+                        // Numeric predicate: position() == n (exact)
                         let pos = (i + 1) as f64;
-                        (pos - n).abs() < 0.5 && !n.is_nan()
+                        pos == *n
                     }
                     _ => val.is_truthy(),
                 };
@@ -1197,7 +1190,9 @@ fn matches_node_test(index: &XmlIndex, node: XPathNode, test: &NodeTest) -> bool
         (XPathNode::Attribute(_, _), NodeTest::Wildcard) => true,
         (XPathNode::Text(_), NodeTest::Text) => true,
         (XPathNode::Element(idx), NodeTest::Name(name)) if idx < index.tag_count() => {
-            index.tag_name_eq(idx, name)
+            // Name test matches only elements (Open/SelfClose), not PI/Comment/CData
+            (index.tag_types[idx] == TagType::Open || index.tag_types[idx] == TagType::SelfClose)
+                && index.tag_name_eq(idx, name)
         }
         (XPathNode::Element(idx), NodeTest::Comment) if idx < index.tag_count() => {
             index.tag_types[idx] == TagType::Comment

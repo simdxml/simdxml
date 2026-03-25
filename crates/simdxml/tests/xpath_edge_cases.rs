@@ -77,7 +77,7 @@ fn test_position_predicates() {
     // Position predicate with float — XPath spec says [2.5] is true when
     // position() = 2.5, which never holds. But our impl rounds the number
     // (matching libxml2 behavior), so [2.5] → position 3.
-    assert_xpath(xml, "/r/a[2.5]", 1); // rounds to 3 in our impl
+    assert_xpath(xml, "/r/a[2.5]", 0); // Non-integer position never matches
 }
 
 // ============================================================================
