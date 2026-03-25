@@ -225,6 +225,7 @@ fn eval_location_path<'a>(
             && steps[i].node_test == NodeTest::Node
             && steps[i].predicates.is_empty()
             && steps[i + 1].axis == Axis::Child
+            && steps[i + 1].predicates.is_empty()  // predicates need per-parent context
         {
             context = eval_fused_descendant_child(index, &context, &steps[i + 1])?;
             i += 2;

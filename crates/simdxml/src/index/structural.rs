@@ -257,6 +257,222 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
     Ok(index)
 }
 
+/// Two-stage SIMD parser: Stage 1 classifies all bytes with NEON,
+/// Stage 2 walks the bitmasks to build the structural index.
+pub fn parse_two_stage<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
+    let structural = crate::simd::classify_structural(input);
+
+    let mut index = XmlIndex {
+        input,
+        tag_starts: Vec::new(),
+        tag_ends: Vec::new(),
+        tag_types: Vec::new(),
+        tag_names: Vec::new(),
+        depths: Vec::new(),
+        parents: Vec::new(),
+        text_ranges: Vec::new(),
+        child_offsets: Vec::new(),
+        child_data: Vec::new(),
+        text_child_offsets: Vec::new(),
+        text_child_data: Vec::new(),
+        close_map: Vec::new(),
+        name_ids: Vec::new(),
+        name_table: Vec::new(),
+        name_posting: Vec::new(),
+    };
+
+    let mut depth: u16 = 0;
+    let mut parent_stack: Vec<u32> = Vec::new();
+    let mut last_tag_end: usize = 0;
+
+    // Pre-collect gt positions for fast lookup of matching '>'
+    let gt_positions: Vec<usize> = structural.gt_positions().collect();
+    let mut gt_idx = 0;
+
+    // Stage 2: walk '<' positions from Stage 1
+    for lt_pos in structural.lt_positions() {
+        // Text content between previous tag end and this '<'
+        let text_start = if last_tag_end > 0 { last_tag_end + 1 } else { 0 };
+        if text_start < lt_pos {
+            let parent = parent_stack.last().copied().unwrap_or(u32::MAX);
+            index.text_ranges.push(TextRange {
+                start: text_start as u32,
+                end: lt_pos as u32,
+                parent_tag: parent,
+            });
+        }
+
+        let tag_start = lt_pos;
+        if tag_start + 1 >= input.len() { break; }
+
+        // Find the matching '>' for this '<'
+        while gt_idx < gt_positions.len() && gt_positions[gt_idx] <= lt_pos {
+            gt_idx += 1;
+        }
+        let gt_pos = if gt_idx < gt_positions.len() {
+            gt_positions[gt_idx]
+        } else {
+            return Err(SimdXmlError::UnclosedTag(tag_start));
+        };
+
+        match input[tag_start + 1] {
+            b'/' => {
+                // Close tag
+                let name_start = tag_start + 2;
+                let mut name_end = name_start;
+                while name_end < gt_pos && !input[name_end].is_ascii_whitespace() {
+                    name_end += 1;
+                }
+
+                if depth > 0 { depth -= 1; }
+                parent_stack.pop();
+
+                index.tag_starts.push(tag_start as u32);
+                index.tag_ends.push(gt_pos as u32);
+                index.tag_types.push(TagType::Close);
+                index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
+                index.depths.push(depth);
+                index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
+
+                last_tag_end = gt_pos;
+            }
+            b'!' => {
+                if input.get(tag_start + 2..tag_start + 4) == Some(b"--") {
+                    // Comment: <!-- ... -->
+                    // Find --> (the gt_pos might be inside the comment)
+                    let mut end = tag_start + 4;
+                    while end + 2 < input.len() {
+                        if &input[end..end + 3] == b"-->" {
+                            end += 2;
+                            break;
+                        }
+                        end += 1;
+                    }
+
+                    index.tag_starts.push(tag_start as u32);
+                    index.tag_ends.push(end as u32);
+                    index.tag_types.push(TagType::Comment);
+                    index.tag_names.push((0, 0));
+                    index.depths.push(depth);
+                    index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
+
+                    last_tag_end = end;
+                    // Advance gt_idx past comment end
+                    while gt_idx < gt_positions.len() && gt_positions[gt_idx] <= end {
+                        gt_idx += 1;
+                    }
+                } else if input.get(tag_start + 2..tag_start + 9) == Some(b"[CDATA[") {
+                    // CDATA
+                    let content_start = tag_start + 9;
+                    let mut end = content_start;
+                    while end + 2 < input.len() {
+                        if &input[end..end + 3] == b"]]>" {
+                            let parent = parent_stack.last().copied().unwrap_or(u32::MAX);
+                            if end > content_start {
+                                index.text_ranges.push(TextRange {
+                                    start: content_start as u32,
+                                    end: end as u32,
+                                    parent_tag: parent,
+                                });
+                            }
+                            end += 2;
+                            break;
+                        }
+                        end += 1;
+                    }
+
+                    index.tag_starts.push(tag_start as u32);
+                    index.tag_ends.push(end as u32);
+                    index.tag_types.push(TagType::CData);
+                    index.tag_names.push((0, 0));
+                    index.depths.push(depth);
+                    index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
+
+                    last_tag_end = end;
+                    while gt_idx < gt_positions.len() && gt_positions[gt_idx] <= end {
+                        gt_idx += 1;
+                    }
+                } else {
+                    // DOCTYPE — skip
+                    last_tag_end = gt_pos;
+                }
+            }
+            b'?' => {
+                // Processing instruction
+                let name_start = tag_start + 2;
+                let mut name_end = name_start;
+                while name_end < input.len()
+                    && input[name_end] != b'?'
+                    && input[name_end] != b'>'
+                    && !input[name_end].is_ascii_whitespace()
+                {
+                    name_end += 1;
+                }
+
+                // Find ?>
+                let mut end = name_end;
+                while end + 1 < input.len() {
+                    if input[end] == b'?' && input[end + 1] == b'>' {
+                        end += 1;
+                        break;
+                    }
+                    end += 1;
+                }
+
+                index.tag_starts.push(tag_start as u32);
+                index.tag_ends.push(end as u32);
+                index.tag_types.push(TagType::PI);
+                index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
+                index.depths.push(depth);
+                index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
+
+                last_tag_end = end;
+                while gt_idx < gt_positions.len() && gt_positions[gt_idx] <= end {
+                    gt_idx += 1;
+                }
+            }
+            _ => {
+                // Open or self-closing tag
+                let name_start = tag_start + 1;
+                let mut name_end = name_start;
+                while name_end < gt_pos
+                    && input[name_end] != b'>'
+                    && input[name_end] != b'/'
+                    && !input[name_end].is_ascii_whitespace()
+                {
+                    name_end += 1;
+                }
+
+                // Check for self-closing: look for /> before >
+                let self_closing = gt_pos > 0 && input[gt_pos - 1] == b'/';
+                let tag_type = if self_closing { TagType::SelfClose } else { TagType::Open };
+
+                let tag_idx = index.tag_starts.len() as u32;
+                let parent = parent_stack.last().copied().unwrap_or(u32::MAX);
+
+                index.tag_starts.push(tag_start as u32);
+                index.tag_ends.push(gt_pos as u32);
+                index.tag_types.push(tag_type);
+                index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
+                index.depths.push(depth);
+                index.parents.push(parent);
+
+                if tag_type == TagType::Open {
+                    parent_stack.push(tag_idx);
+                    depth += 1;
+                }
+
+                last_tag_end = gt_pos;
+            }
+        }
+    }
+
+    if index.tag_count() >= 64 {
+        index.build_indices();
+    }
+    Ok(index)
+}
+
 
 #[cfg(test)]
 mod tests {

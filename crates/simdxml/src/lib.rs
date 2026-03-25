@@ -23,6 +23,7 @@
 
 pub mod error;
 pub mod index;
+pub mod simd;
 pub mod xpath;
 
 pub use error::{Result, SimdXmlError};
@@ -33,6 +34,16 @@ pub use xpath::CompiledXPath;
 ///
 /// This is the main entry point. Returns an `XmlIndex` that can be
 /// queried with XPath expressions.
+///
+/// Uses SIMD-accelerated byte scanning (memchr with NEON/AVX2)
+/// for finding structural characters, with sequential tag processing.
+///
+/// Note: A full simdjson-style two-stage classifier (NEON vectorized
+/// classification of all bytes) is available via `parse_two_stage()` but
+/// is slower for text-heavy XML because it processes text bytes that
+/// memchr skips entirely. The sparse `<`/`>` distribution in XML
+/// (unlike dense structural characters in JSON) favors the targeted
+/// memchr approach.
 pub fn parse(input: &[u8]) -> Result<XmlIndex<'_>> {
     index::structural::parse_scalar(input)
 }
