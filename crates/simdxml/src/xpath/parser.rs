@@ -24,8 +24,7 @@ pub fn parse_xpath(input: &str) -> Result<XPathExpr> {
 }
 
 fn xpath_expr(input: &str) -> IResult<&str, XPathExpr> {
-    // For now, parse location paths and simple expressions
-    // Full XPath 1.0 expression grammar will be expanded
+    // Support parenthesized filter: (expr)[pred]
     alt((union_expr, location_path_expr))(input)
 }
 
@@ -320,6 +319,11 @@ fn comparison_op(input: &str) -> IResult<&str, BinaryOp> {
         nom::combinator::map(char('='), |_| BinaryOp::Eq),
         nom::combinator::map(char('<'), |_| BinaryOp::Lt),
         nom::combinator::map(char('>'), |_| BinaryOp::Gt),
+        nom::combinator::map(tag(" div "), |_| BinaryOp::Div),
+        nom::combinator::map(tag(" mod "), |_| BinaryOp::Mod),
+        nom::combinator::map(tag(" + "), |_| BinaryOp::Add),
+        nom::combinator::map(tag(" - "), |_| BinaryOp::Sub),
+        nom::combinator::map(tag(" * "), |_| BinaryOp::Mul),
     ))(input)
 }
 

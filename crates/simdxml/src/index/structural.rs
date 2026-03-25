@@ -30,8 +30,9 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                 0
             };
             if text_start < pos {
-                let text = &input[text_start..pos];
-                if text.iter().any(|&b| !b.is_ascii_whitespace()) {
+                // Include ALL text nodes, even whitespace-only.
+                // XPath node() requires whitespace text nodes.
+                {
                     let parent = parent_stack.last().copied().unwrap_or(u32::MAX);
                     index.text_ranges.push(TextRange {
                         start: text_start as u32,

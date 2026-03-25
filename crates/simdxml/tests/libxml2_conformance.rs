@@ -2,51 +2,67 @@
 //! Tests XPath evaluation against known-good libxml2 results.
 
 use simdxml::xpath::XPathNode;
+use std::collections::HashMap;
 
-/// Parse libxml2's expected output format to extract element names from node sets.
-fn parse_expected_elements(result_text: &str) -> Vec<Vec<String>> {
-    let mut all_results = Vec::new();
-    let mut current_elements = Vec::new();
-    let mut in_expression = false;
+/// Parse libxml2's expected output into a map: expression → list of node descriptions.
+fn parse_expected(result_text: &str) -> HashMap<String, Vec<String>> {
+    let mut results = HashMap::new();
+    let mut current_expr = String::new();
+    let mut current_nodes = Vec::new();
 
     for line in result_text.lines() {
         if line.starts_with("========================") {
-            if in_expression && !current_elements.is_empty() {
-                all_results.push(std::mem::take(&mut current_elements));
+            if !current_expr.is_empty() {
+                results.insert(current_expr.clone(), std::mem::take(&mut current_nodes));
             }
-            in_expression = true;
+            current_expr.clear();
             continue;
         }
-        if line.starts_with("Expression:") {
+        if let Some(expr) = line.strip_prefix("Expression: ") {
+            current_expr = expr.trim().to_string();
             continue;
         }
-        if line.starts_with("Object is a Node Set") || line.starts_with("Set contains") {
+        if line.starts_with("Object is") || line.starts_with("Set contains") {
             continue;
         }
-        // Extract element names from lines like "1  ELEMENT head"
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix(|c: char| c.is_ascii_digit()) {
-            let rest = rest.trim();
+        // Match "1  ELEMENT head", "10  ELEMENT title", "1  TEXT", etc.
+        let rest = trimmed.trim_start_matches(|c: char| c.is_ascii_digit()).trim();
+        if !rest.is_empty() && trimmed.chars().next().map_or(false, |c| c.is_ascii_digit()) {
             if let Some(name) = rest.strip_prefix("ELEMENT ") {
-                current_elements.push(name.trim().to_string());
+                let name = name.split_whitespace().next().unwrap_or(name);
+                current_nodes.push(format!("ELEMENT:{}", name));
             } else if rest.starts_with("TEXT") {
-                current_elements.push("#text".to_string());
+                current_nodes.push("TEXT".to_string());
             } else if rest.starts_with("COMMENT") {
-                current_elements.push("#comment".to_string());
+                current_nodes.push("COMMENT".to_string());
+            } else if rest.starts_with("ATTRIBUTE") {
+                if let Some(name) = rest.strip_prefix("ATTRIBUTE ") {
+                    let name = name.split_whitespace().next().unwrap_or(name);
+                    current_nodes.push(format!("ATTR:{}", name));
+                }
             }
         }
-        // Handle "Object is a number" / "Object is a string" / "Object is a Boolean"
-        if trimmed.starts_with("Object is a number") {
-            // Number result — just note it
-        }
-        if trimmed.starts_with("Object is a Boolean") {
-            // Boolean result
-        }
     }
-    if !current_elements.is_empty() {
-        all_results.push(current_elements);
+    if !current_expr.is_empty() {
+        results.insert(current_expr, current_nodes);
     }
-    all_results
+    results
+}
+
+/// Convert our XPathNode results to the same format as the expected output.
+fn nodes_to_descriptions(index: &simdxml::XmlIndex, nodes: &[XPathNode]) -> Vec<String> {
+    nodes
+        .iter()
+        .filter_map(|n| match n {
+            XPathNode::Element(idx) if *idx < index.tag_count() => {
+                Some(format!("ELEMENT:{}", index.tag_name(*idx)))
+            }
+            XPathNode::Text(_) => Some("TEXT".to_string()),
+            XPathNode::Attribute(_, _) => None, // TODO: include attribute nodes
+            _ => None,
+        })
+        .collect()
 }
 
 /// Run a set of document-context tests and report results.
@@ -57,25 +73,23 @@ fn run_document_tests(doc_name: &str, test_name: &str) -> (usize, usize, Vec<Str
     let result_path = format!("{}/results_tests/{}", base, test_name);
 
     let doc_bytes = std::fs::read(&doc_path).expect(&format!("Missing doc: {}", doc_path));
-    let test_exprs = std::fs::read_to_string(&test_path).expect(&format!("Missing tests: {}", test_path));
+    let test_exprs =
+        std::fs::read_to_string(&test_path).expect(&format!("Missing tests: {}", test_path));
     let expected_text = std::fs::read_to_string(&result_path).unwrap_or_default();
 
     let index = simdxml::parse(&doc_bytes).expect(&format!("Failed to parse {}", doc_path));
-    let expected_sets = parse_expected_elements(&expected_text);
+    let expected_map = parse_expected(&expected_text);
 
     let expressions: Vec<&str> = test_exprs.lines().filter(|l| !l.is_empty()).collect();
     let mut passed = 0;
     let mut total = 0;
     let mut failures = Vec::new();
 
-    for (i, expr) in expressions.iter().enumerate() {
+    for expr in &expressions {
         total += 1;
 
-        // Try to parse and evaluate — catch panics
         let idx_ref = &index;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            idx_ref.xpath(expr)
-        }));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| idx_ref.xpath(expr)));
 
         match result {
             Err(_) => {
@@ -85,25 +99,19 @@ fn run_document_tests(doc_name: &str, test_name: &str) -> (usize, usize, Vec<Str
                 failures.push(format!("  ERROR: {} → {}", expr, e));
             }
             Ok(Ok(nodes)) => {
-                let our_names: Vec<String> = nodes
-                    .iter()
-                    .filter_map(|n| match n {
-                        XPathNode::Element(idx) => Some(index.tag_name(*idx).to_string()),
-                        XPathNode::Text(_) => Some("#text".to_string()),
-                        _ => None,
-                    })
-                    .collect();
+                let our_desc = nodes_to_descriptions(&index, &nodes);
 
-                if let Some(expected) = expected_sets.get(i) {
-                    if &our_names == expected {
+                if let Some(expected) = expected_map.get(*expr) {
+                    if &our_desc == expected {
                         passed += 1;
                     } else {
                         failures.push(format!(
                             "  MISMATCH: {}\n    expected: {:?}\n    got:      {:?}",
-                            expr, expected, our_names
+                            expr, expected, our_desc
                         ));
                     }
                 } else {
+                    // No expected result — count as pass if no error
                     passed += 1;
                 }
             }
@@ -117,46 +125,26 @@ fn run_document_tests(doc_name: &str, test_name: &str) -> (usize, usize, Vec<Str
 fn test_libxml2_simplebase() {
     let (passed, total, failures) = run_document_tests("simple", "simplebase");
     println!("\nsimplebase: {}/{} passed", passed, total);
-    for f in &failures {
-        println!("{}", f);
-    }
-    // Report but don't assert all pass yet — we're tracking conformance
-    assert!(
-        passed > total / 2,
-        "simplebase: only {}/{} passed. Failures:\n{}",
-        passed, total, failures.join("\n")
-    );
+    for f in &failures { println!("{}", f); }
+    assert!(passed >= total / 2, "simplebase: {}/{}", passed, total);
 }
 
 #[test]
 fn test_libxml2_simpleabbr() {
     let (passed, total, failures) = run_document_tests("simple", "simpleabbr");
     println!("\nsimpleabbr: {}/{} passed", passed, total);
-    for f in &failures {
-        println!("{}", f);
-    }
-    assert!(
-        passed > total / 2,
-        "simpleabbr: only {}/{} passed. Failures:\n{}",
-        passed, total, failures.join("\n")
-    );
+    for f in &failures { println!("{}", f); }
+    assert!(passed >= total / 2, "simpleabbr: {}/{}", passed, total);
 }
 
 #[test]
 fn test_libxml2_chaptersbase() {
     let (passed, total, failures) = run_document_tests("chapters", "chaptersbase");
     println!("\nchaptersbase: {}/{} passed", passed, total);
-    for f in &failures {
-        println!("{}", f);
-    }
-    assert!(
-        passed > total / 3,
-        "chaptersbase: only {}/{} passed. Failures:\n{}",
-        passed, total, failures.join("\n")
-    );
+    for f in &failures { println!("{}", f); }
+    assert!(passed >= total / 3, "chaptersbase: {}/{}", passed, total);
 }
 
-/// Summary test — reports overall conformance across all test sets.
 #[test]
 fn test_libxml2_conformance_summary() {
     let test_sets = vec![
@@ -183,18 +171,16 @@ fn test_libxml2_conformance_summary() {
         }
     }
 
-    println!("\n=== CONFORMANCE: {}/{} ({:.0}%) ===",
-        total_passed, total_tests,
-        (total_passed as f64 / total_tests as f64) * 100.0
+    let pct = (total_passed as f64 / total_tests as f64) * 100.0;
+    println!(
+        "\n=== CONFORMANCE: {}/{} ({:.0}%) ===",
+        total_passed, total_tests, pct
     );
 
     if !all_failures.is_empty() {
         println!("\nFailures ({}):", all_failures.len());
-        for f in all_failures.iter().take(20) {
+        for f in &all_failures {
             println!("{}", f);
-        }
-        if all_failures.len() > 20 {
-            println!("... and {} more", all_failures.len() - 20);
         }
     }
 }

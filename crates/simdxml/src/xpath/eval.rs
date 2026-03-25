@@ -102,6 +102,9 @@ fn eval_step<'a>(
 ) -> Result<Vec<XPathNode>> {
     let mut result = Vec::new();
 
+    // For each context node, evaluate the axis + node test + predicates.
+    // Predicates are applied PER CONTEXT NODE — this is critical for
+    // correct position() behavior. //p[1] means "first p child of each parent".
     for &node in context {
         let candidates = match step.axis {
             Axis::Child => eval_child_axis(index, node),
@@ -116,19 +119,21 @@ fn eval_step<'a>(
             Axis::Preceding => eval_preceding_axis(index, node),
             Axis::SelfAxis => vec![node],
             Axis::Attribute => eval_attribute_axis(index, node, &step.node_test),
-            Axis::Namespace => vec![], // TODO
+            Axis::Namespace => vec![],
         };
 
-        for candidate in candidates {
-            if matches_node_test(index, candidate, &step.node_test) {
-                result.push(candidate);
-            }
-        }
-    }
+        // Filter by node test
+        let mut matched: Vec<XPathNode> = candidates
+            .into_iter()
+            .filter(|c| matches_node_test(index, *c, &step.node_test))
+            .collect();
 
-    // Apply predicates (filter the result set)
-    for pred in &step.predicates {
-        result = apply_predicate(index, &result, pred)?;
+        // Apply predicates per-context-node
+        for pred in &step.predicates {
+            matched = apply_predicate(index, &matched, pred)?;
+        }
+
+        result.extend(matched);
     }
 
     Ok(result)
@@ -257,6 +262,24 @@ fn eval_predicate_value(
             } else {
                 Ok(XPathValue::String(String::new()))
             }
+        }
+        XPathExpr::BinaryOp(left, op, right) => {
+            let l = eval_predicate_value(index, node, left, position, size)?;
+            let r = eval_predicate_value(index, node, right, position, size)?;
+            let ln = l.as_number();
+            let rn = r.as_number();
+            let result = match op {
+                BinaryOp::Add => ln + rn,
+                BinaryOp::Sub => ln - rn,
+                BinaryOp::Mul => ln * rn,
+                BinaryOp::Div => ln / rn,
+                BinaryOp::Mod => ln % rn,
+                _ => {
+                    // Comparison operators return boolean
+                    return Ok(XPathValue::Boolean(compare_values(&l, op, &r)));
+                }
+            };
+            Ok(XPathValue::Number(result))
         }
         _ => Ok(XPathValue::String(String::new())),
     }
@@ -456,24 +479,29 @@ fn eval_child_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
         return result;
     }
 
+    // Collect children with byte offsets for document-order sorting
+    let mut children_with_pos: Vec<(u32, XPathNode)> = Vec::new();
+
     // Child elements
     for i in 0..index.tag_count() {
         if index.parents[i] == parent_idx as u32
             && (index.tag_types[i] == TagType::Open
                 || index.tag_types[i] == TagType::SelfClose)
         {
-            result.push(XPathNode::Element(i));
+            children_with_pos.push((index.tag_starts[i], XPathNode::Element(i)));
         }
     }
 
     // Child text nodes
     for (i, range) in index.text_ranges.iter().enumerate() {
         if range.parent_tag == parent_idx as u32 {
-            result.push(XPathNode::Text(i));
+            children_with_pos.push((range.start, XPathNode::Text(i)));
         }
     }
 
-    result
+    // Sort by document position
+    children_with_pos.sort_by_key(|(pos, _)| *pos);
+    children_with_pos.into_iter().map(|(_, node)| node).collect()
 }
 
 fn eval_descendant_axis(index: &XmlIndex, node: XPathNode, include_self: bool) -> Vec<XPathNode> {
@@ -631,6 +659,9 @@ fn eval_preceding_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
     let XPathNode::Element(idx) = node else {
         return vec![];
     };
+    if idx == DOC_ROOT || idx >= index.tag_count() {
+        return vec![];
+    }
 
     let mut result = Vec::new();
 
