@@ -242,7 +242,7 @@ fn test_pugixml_conformance() {
             errors, panics, counts, types, nofails);
 
         // Print first 20 failures for debugging
-        for f in failures.iter().take(20) {
+        for f in failures.iter().take(500) {
             println!("  {}", f);
         }
         if failures.len() > 20 {

@@ -460,11 +460,14 @@ fn eval_step<'a>(
             Axis::Namespace => eval_namespace_axis(index, node),
         };
 
-        // Filter by node test
-        let mut matched: Vec<XPathNode> = candidates
-            .into_iter()
-            .filter(|c| matches_node_test(index, *c, &step.node_test))
-            .collect();
+        // Filter by node test (skip for attribute/namespace axes which pre-filter)
+        let mut matched: Vec<XPathNode> = if step.axis == Axis::Attribute || step.axis == Axis::Namespace {
+            candidates
+        } else {
+            candidates.into_iter()
+                .filter(|c| matches_node_test(index, *c, &step.node_test))
+                .collect()
+        };
 
         // Apply predicates per-context-node
         for pred in &step.predicates {
@@ -1098,14 +1101,24 @@ fn evaluate_in_context(
 fn matches_node_test(index: &XmlIndex, node: XPathNode, test: &NodeTest) -> bool {
     match (node, test) {
         (_, NodeTest::Node) => true,
-        (_, NodeTest::Wildcard) => matches!(node, XPathNode::Element(_) | XPathNode::Namespace(_, _) | XPathNode::Attribute(_, _)),
+        (XPathNode::Element(idx), NodeTest::Wildcard) => {
+            // Wildcard matches elements (Open/SelfClose) but NOT comments/PIs/CData
+            idx == DOC_ROOT || (idx < index.tag_count()
+                && (index.tag_types[idx] == TagType::Open || index.tag_types[idx] == TagType::SelfClose))
+        }
+        (XPathNode::Namespace(_, _), NodeTest::Wildcard) => true,
+        (XPathNode::Attribute(_, _), NodeTest::Wildcard) => true,
         (XPathNode::Text(_), NodeTest::Text) => true,
         (XPathNode::Element(idx), NodeTest::Name(name)) => index.tag_name_eq(idx, name),
         (XPathNode::Element(idx), NodeTest::Comment) => {
             index.tag_types[idx] == TagType::Comment
         }
         (XPathNode::Element(idx), NodeTest::PI) => index.tag_types[idx] == TagType::PI,
-        (XPathNode::Attribute(_, _), NodeTest::Name(_)) => true, // already matched in axis
+        // Attribute name test: only matches in attribute axis context.
+        // This is handled by eval_attribute_axis — if we get here from
+        // another axis (self, ancestor-or-self), attributes don't match
+        // element name tests.
+        (XPathNode::Attribute(_, _), NodeTest::Name(_)) => false,
         // Namespace nodes: match by prefix name or wildcard
         (XPathNode::Namespace(_, hash), NodeTest::Name(name)) => hash == attr_name_hash(name),
         _ => false,

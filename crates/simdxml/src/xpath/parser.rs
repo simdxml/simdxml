@@ -411,65 +411,77 @@ fn and_expr(input: &str) -> IResult<&str, XPathExpr> {
 }
 
 fn equality_expr(input: &str) -> IResult<&str, XPathExpr> {
-    let (input, left) = relational_expr(input)?;
-    let (input, _) = multispace0(input)?;
-    if let Ok((rest, op)) = alt::<_, _, nom::error::Error<&str>, _>((
-        nom::combinator::map(tag("!="), |_| BinaryOp::Neq),
-        nom::combinator::map(char('='), |_| BinaryOp::Eq),
-    ))(input) {
-        let (rest, _) = multispace0(rest)?;
-        let (rest, right) = equality_expr(rest)?;
-        Ok((rest, XPathExpr::BinaryOp(Box::new(left), op, Box::new(right))))
-    } else {
-        Ok((input, left))
+    let (mut input, mut left) = relational_expr(input)?;
+    loop {
+        let (rest, _) = multispace0(input)?;
+        if let Ok((rest, op)) = alt::<_, _, nom::error::Error<&str>, _>((
+            nom::combinator::map(tag("!="), |_| BinaryOp::Neq),
+            nom::combinator::map(char('='), |_| BinaryOp::Eq),
+        ))(rest) {
+            let (rest, _) = multispace0(rest)?;
+            let (rest, right) = relational_expr(rest)?;
+            left = XPathExpr::BinaryOp(Box::new(left), op, Box::new(right));
+            input = rest;
+        } else {
+            return Ok((input, left));
+        }
     }
 }
 
 fn relational_expr(input: &str) -> IResult<&str, XPathExpr> {
-    let (input, left) = additive_expr(input)?;
-    let (input, _) = multispace0(input)?;
-    if let Ok((rest, op)) = alt::<_, _, nom::error::Error<&str>, _>((
-        nom::combinator::map(tag("<="), |_| BinaryOp::Lte),
-        nom::combinator::map(tag(">="), |_| BinaryOp::Gte),
-        nom::combinator::map(char('<'), |_| BinaryOp::Lt),
-        nom::combinator::map(char('>'), |_| BinaryOp::Gt),
-    ))(input) {
-        let (rest, _) = multispace0(rest)?;
-        let (rest, right) = relational_expr(rest)?;
-        Ok((rest, XPathExpr::BinaryOp(Box::new(left), op, Box::new(right))))
-    } else {
-        Ok((input, left))
+    let (mut input, mut left) = additive_expr(input)?;
+    loop {
+        let (rest, _) = multispace0(input)?;
+        if let Ok((rest, op)) = alt::<_, _, nom::error::Error<&str>, _>((
+            nom::combinator::map(tag("<="), |_| BinaryOp::Lte),
+            nom::combinator::map(tag(">="), |_| BinaryOp::Gte),
+            nom::combinator::map(char('<'), |_| BinaryOp::Lt),
+            nom::combinator::map(char('>'), |_| BinaryOp::Gt),
+        ))(rest) {
+            let (rest, _) = multispace0(rest)?;
+            let (rest, right) = additive_expr(rest)?;
+            left = XPathExpr::BinaryOp(Box::new(left), op, Box::new(right));
+            input = rest;
+        } else {
+            return Ok((input, left));
+        }
     }
 }
 
 fn additive_expr(input: &str) -> IResult<&str, XPathExpr> {
-    let (input, left) = multiplicative_expr(input)?;
-    let (input, _) = multispace0(input)?;
-    if let Ok((rest, op)) = alt::<_, _, nom::error::Error<&str>, _>((
-        nom::combinator::map(char('+'), |_| BinaryOp::Add),
-        nom::combinator::map(char('-'), |_| BinaryOp::Sub),
-    ))(input) {
-        let (rest, _) = multispace0(rest)?;
-        let (rest, right) = additive_expr(rest)?;
-        Ok((rest, XPathExpr::BinaryOp(Box::new(left), op, Box::new(right))))
-    } else {
-        Ok((input, left))
+    let (mut input, mut left) = multiplicative_expr(input)?;
+    loop {
+        let (rest, _) = multispace0(input)?;
+        if let Ok((rest, op)) = alt::<_, _, nom::error::Error<&str>, _>((
+            nom::combinator::map(char('+'), |_| BinaryOp::Add),
+            nom::combinator::map(char('-'), |_| BinaryOp::Sub),
+        ))(rest) {
+            let (rest, _) = multispace0(rest)?;
+            let (rest, right) = multiplicative_expr(rest)?;
+            left = XPathExpr::BinaryOp(Box::new(left), op, Box::new(right));
+            input = rest;
+        } else {
+            return Ok((input, left));
+        }
     }
 }
 
 fn multiplicative_expr(input: &str) -> IResult<&str, XPathExpr> {
-    let (input, left) = unary_expr(input)?;
-    let (input, _) = multispace0(input)?;
-    if let Ok((rest, op)) = alt::<_, _, nom::error::Error<&str>, _>((
-        nom::combinator::map(char('*'), |_| BinaryOp::Mul),
-        nom::combinator::map(tag("div"), |_| BinaryOp::Div),
-        nom::combinator::map(tag("mod"), |_| BinaryOp::Mod),
-    ))(input) {
-        let (rest, _) = multispace0(rest)?;
-        let (rest, right) = multiplicative_expr(rest)?;
-        Ok((rest, XPathExpr::BinaryOp(Box::new(left), op, Box::new(right))))
-    } else {
-        Ok((input, left))
+    let (mut input, mut left) = unary_expr(input)?;
+    loop {
+        let (rest, _) = multispace0(input)?;
+        if let Ok((rest, op)) = alt::<_, _, nom::error::Error<&str>, _>((
+            nom::combinator::map(char('*'), |_| BinaryOp::Mul),
+            nom::combinator::map(tag("div"), |_| BinaryOp::Div),
+            nom::combinator::map(tag("mod"), |_| BinaryOp::Mod),
+        ))(rest) {
+            let (rest, _) = multispace0(rest)?;
+            let (rest, right) = unary_expr(rest)?;
+            left = XPathExpr::BinaryOp(Box::new(left), op, Box::new(right));
+            input = rest;
+        } else {
+            return Ok((input, left));
+        }
     }
 }
 
