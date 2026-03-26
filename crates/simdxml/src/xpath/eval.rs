@@ -455,6 +455,41 @@ fn eval_fused_descendant_child(
                     }
                 }
             }
+            NodeTest::NamespacedName(prefix, local) => {
+                // Reconstruct full QName and use posting list (same fast path as Name)
+                let full_name = if local == "*" {
+                    // prefix:* — scan for prefix match
+                    let prefix_colon = format!("{}:", prefix);
+                    for j in scan_start..scan_end {
+                        let tt = index.tag_types[j];
+                        if (tt == TagType::Open || tt == TagType::SelfClose)
+                            && index.tag_name(j).starts_with(&prefix_colon)
+                        {
+                            result.push(XPathNode::Element(j));
+                        }
+                    }
+                    continue;
+                } else {
+                    format!("{}:{}", prefix, local)
+                };
+                let posting = index.tags_by_name(&full_name);
+                if !posting.is_empty() && scan_start == 0 && scan_end == index.tag_count() {
+                    result.extend(posting.iter().map(|&j| XPathNode::Element(j as usize)));
+                } else if !posting.is_empty() {
+                    let lo = posting.partition_point(|&j| (j as usize) < scan_start);
+                    let hi = posting.partition_point(|&j| (j as usize) < scan_end);
+                    result.extend(posting[lo..hi].iter().map(|&j| XPathNode::Element(j as usize)));
+                } else {
+                    for j in scan_start..scan_end {
+                        let tt = index.tag_types[j];
+                        if (tt == TagType::Open || tt == TagType::SelfClose)
+                            && index.tag_name_eq(j, &full_name)
+                        {
+                            result.push(XPathNode::Element(j));
+                        }
+                    }
+                }
+            }
             _ => {
                 let desc = eval_descendant_axis(index, ctx_node, true);
                 for dn in desc {
@@ -507,6 +542,29 @@ fn eval_fused_descendant_child_with_preds(
                         && index.tag_name_eq(j, name)
                     {
                         all_matches.push(XPathNode::Element(j));
+                    }
+                }
+            }
+            NodeTest::NamespacedName(prefix, local) => {
+                if local == "*" {
+                    let prefix_colon = format!("{}:", prefix);
+                    for j in scan_start..scan_end {
+                        let tt = index.tag_types[j];
+                        if (tt == TagType::Open || tt == TagType::SelfClose)
+                            && index.tag_name(j).starts_with(&prefix_colon)
+                        {
+                            all_matches.push(XPathNode::Element(j));
+                        }
+                    }
+                } else {
+                    let full_name = format!("{}:{}", prefix, local);
+                    for j in scan_start..scan_end {
+                        let tt = index.tag_types[j];
+                        if (tt == TagType::Open || tt == TagType::SelfClose)
+                            && index.tag_name_eq(j, &full_name)
+                        {
+                            all_matches.push(XPathNode::Element(j));
+                        }
                     }
                 }
             }
