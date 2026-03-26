@@ -34,28 +34,27 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
 
     let mut pos = 0;
     let mut depth: u16 = 0;
-    let mut parent_stack: Vec<u32> = Vec::new(); // stack of open tag indices
-    let mut last_tag_end: usize = 0; // for tracking text content
+    let mut last_tag_end: usize = 0;
 
-    // Main loop: use SIMD-accelerated memchr to find '<' positions
+    // Fixed-size array stack: no heap alloc, no Option overhead, no capacity checks.
+    const MAX_DEPTH: usize = 4096;
+    let mut pstack = [0u32; MAX_DEPTH];
+    let mut stop: usize = 0;
+
     while let Some(offset) = memchr(b'<', &input[pos..]) {
         pos += offset;
 
-        {
-            // Text content between previous tag end and this tag start
-            let text_start = if last_tag_end > 0 {
-                last_tag_end + 1
-            } else {
-                0
-            };
-            if text_start < pos {
-                let parent = parent_stack.last().copied().unwrap_or(u32::MAX);
-                index.text_ranges.push(TextRange {
-                    start: text_start as u32,
-                    end: pos as u32,
-                    parent_tag: parent,
-                });
-            }
+        // Cache current parent once per iteration (was 7+ repeated lookups)
+        let cp = if stop == 0 { u32::MAX } else { pstack[stop - 1] };
+
+        // Text content between previous tag end and this tag start
+        let text_start = if last_tag_end > 0 { last_tag_end + 1 } else { 0 };
+        if text_start < pos {
+            index.text_ranges.push(TextRange {
+                start: text_start as u32,
+                end: pos as u32,
+                parent_tag: cp,
+            });
         }
 
         let tag_start = pos;
@@ -81,18 +80,15 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                         return Err(SimdXmlError::UnclosedTag(tag_start));
                     }
 
-                    if depth > 0 {
-                        depth -= 1;
-                    }
-                    parent_stack.pop();
-
+                    if depth > 0 { depth -= 1; }
+                    if stop > 0 { stop -= 1; }
 
                     index.tag_starts.push(tag_start as u32);
                     index.tag_ends.push(pos as u32);
                     index.tag_types.push(TagType::Close);
                     index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
                     index.depths.push(depth);
-                    index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
+                    index.parents.push(if stop == 0 { u32::MAX } else { pstack[stop - 1] });
 
                     last_tag_end = pos;
                     pos += 1;
@@ -104,7 +100,7 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                         index.tag_types.push(TagType::Comment);
                         index.tag_names.push((0, 0));
                         index.depths.push(depth);
-                        index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
+                        index.parents.push(cp);
 
                         pos += 4;
                         // SIMD-accelerated: find '-' then check for '-->'
@@ -130,7 +126,7 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                         index.tag_types.push(TagType::CData);
                         index.tag_names.push((0, 0));
                         index.depths.push(depth);
-                        index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
+                        index.parents.push(cp);
 
                         pos += 9;
                         let content_start = pos;
@@ -139,12 +135,11 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                             if let Some(off) = memchr(b']', &input[pos..]) {
                                 pos += off;
                                 if pos + 2 < input.len() && &input[pos..pos + 3] == b"]]>" {
-                                    let parent = parent_stack.last().copied().unwrap_or(u32::MAX);
                                     if pos > content_start {
                                         index.text_ranges.push(TextRange {
                                             start: content_start as u32,
                                             end: pos as u32,
-                                            parent_tag: parent,
+                                            parent_tag: cp,
                                         });
                                     }
                                     pos += 2;
@@ -169,7 +164,6 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                 }
                 b'?' => {
                     // Processing instruction: <?target ... ?>
-                    let _tag_idx = index.tag_starts.len();
                     pos += 2;
                     let name_start = pos;
                     while pos < input.len()
@@ -181,12 +175,11 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                     }
                     let name_end = pos;
 
-
                     index.tag_starts.push(tag_start as u32);
                     index.tag_types.push(TagType::PI);
                     index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
                     index.depths.push(depth);
-                    index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
+                    index.parents.push(cp);
 
                     // Skip to ?>
                     while pos + 1 < input.len() {
@@ -243,18 +236,17 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                     };
 
                     let tag_idx = index.tag_starts.len() as u32;
-                    let parent = parent_stack.last().copied().unwrap_or(u32::MAX);
-
 
                     index.tag_starts.push(tag_start as u32);
                     index.tag_ends.push(pos as u32);
                     index.tag_types.push(tag_type);
                     index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
                     index.depths.push(depth);
-                    index.parents.push(parent);
+                    index.parents.push(cp);
 
                     if tag_type == TagType::Open {
-                        parent_stack.push(tag_idx);
+                        pstack[stop] = tag_idx;
+                        stop += 1;
                         depth += 1;
                     }
 
