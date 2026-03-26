@@ -377,63 +377,66 @@ fn merge_chunks<'a>(input: &'a [u8], chunks: Vec<ChunkResult>) -> Result<XmlInde
     let mut close_map = vec![u32::MAX; n];
     let mut post_order = vec![0u32; n];
     let mut depth: u16 = 0;
-    let mut parent_stack: Vec<u32> = Vec::with_capacity(256);
     let mut post_counter: u32 = 0;
     let mut text_idx = 0;
+
+    // Fixed-size array stack — no heap allocation, no Option unwrap, no capacity checks.
+    // Max XML depth of 4096 handles any real-world document.
+    const MAX_DEPTH: usize = 4096;
+    let mut stack = [0u32; MAX_DEPTH];
+    let mut stack_top: usize = 0;
+
+    #[inline(always)]
+    fn stack_peek(stack: &[u32; MAX_DEPTH], top: usize) -> u32 {
+        if top == 0 { u32::MAX } else { stack[top - 1] }
+    }
 
     for i in 0..n {
         let tag_pos = tag_starts[i];
 
         // Interleaved text range parent assignment (O(n+t), sequential access)
+        let current_parent = stack_peek(&stack, stack_top);
         while text_idx < text_ranges.len() && text_ranges[text_idx].start < tag_pos {
-            text_ranges[text_idx].parent_tag = if parent_stack.is_empty() { u32::MAX } else {
-                unsafe { *parent_stack.get_unchecked(parent_stack.len() - 1) }
-            };
+            text_ranges[text_idx].parent_tag = current_parent;
             text_idx += 1;
         }
 
-        let parent = if parent_stack.is_empty() { u32::MAX } else {
-            unsafe { *parent_stack.get_unchecked(parent_stack.len() - 1) }
-        };
-
-        // Direct indexing instead of Vec::push — no bounds checks
         match tag_types[i] {
             TagType::Close => {
                 if depth > 0 { depth -= 1; }
-                if let Some(open_idx) = parent_stack.pop() {
-                    close_map[open_idx as usize] = i as u32;
-                    post_order[open_idx as usize] = post_counter;
+                if stack_top > 0 {
+                    stack_top -= 1;
+                    let open_idx = stack[stack_top] as usize;
+                    close_map[open_idx] = i as u32;
+                    post_order[open_idx] = post_counter;
                 }
                 post_order[i] = post_counter;
                 post_counter += 1;
                 depths[i] = depth;
-                parents[i] = if parent_stack.is_empty() { u32::MAX } else {
-                    unsafe { *parent_stack.get_unchecked(parent_stack.len() - 1) }
-                };
+                parents[i] = stack_peek(&stack, stack_top);
             }
             TagType::Open => {
                 depths[i] = depth;
-                parents[i] = parent;
-                parent_stack.push(i as u32);
+                parents[i] = current_parent;
+                stack[stack_top] = i as u32;
+                stack_top += 1;
                 depth += 1;
             }
             _ => {
-                // SelfClose, Comment, CData, PI — all handled the same way
                 if tag_types[i] == TagType::SelfClose {
                     close_map[i] = i as u32;
                 }
                 post_order[i] = post_counter;
                 post_counter += 1;
                 depths[i] = depth;
-                parents[i] = parent;
+                parents[i] = current_parent;
             }
         }
     }
 
+    let final_parent = stack_peek(&stack, stack_top);
     while text_idx < text_ranges.len() {
-        text_ranges[text_idx].parent_tag = if parent_stack.is_empty() { u32::MAX } else {
-            unsafe { *parent_stack.get_unchecked(parent_stack.len() - 1) }
-        };
+        text_ranges[text_idx].parent_tag = final_parent;
         text_idx += 1;
     }
 
