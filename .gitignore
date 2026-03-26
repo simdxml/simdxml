@@ -8,3 +8,7 @@ venv
 .claude
 .DS_Store
 testdata/bench/
+bench/corpora/
+bench/results/
+bench/pugixml-xpath
+*.sxi

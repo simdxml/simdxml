@@ -1,10 +1,12 @@
 [workspace]
-members = ["crates/simdxml", "crates/simdxml-cli", "crates/duckdb-xpath"]
+members = ["crates/simdxml", "crates/simdxml-cli"]
+exclude = ["crates/duckdb-xpath"]
 resolver = "2"
 
 [profile.release]
 lto = true
 strip = true
+codegen-units = 1
 
 [profile.bench]
 lto = true

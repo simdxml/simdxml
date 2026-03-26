@@ -2,11 +2,14 @@
 name = "simdxml"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 description = "SIMD-accelerated XML parser with full XPath 1.0 support"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cigrainger/simdxml"
-keywords = ["xml", "xpath", "simd", "parser"]
+readme = "README.md"
+keywords = ["xml", "xpath", "simd", "parser", "performance"]
 categories = ["parser-implementations", "text-processing"]
+exclude = ["testdata/", "benches/"]
 
 [dependencies]
 nom = "7"
