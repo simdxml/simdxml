@@ -89,8 +89,11 @@ pub fn classify_structural(input: &[u8]) -> StructuralIndex {
             // Safety: AVX2 availability checked above
             return unsafe { avx2::classify_avx2(input) };
         }
-        // Safety: SSE4.2 is baseline for x86_64
-        return unsafe { sse42::classify_sse42(input) };
+        if is_x86_feature_detected!("sse4.2") {
+            // Safety: SSE4.2 availability checked above
+            return unsafe { sse42::classify_sse42(input) };
+        }
+        return scalar::classify_scalar(input);
     }
 
     // Universal scalar fallback for other architectures

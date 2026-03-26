@@ -195,7 +195,7 @@ fn apply_quote_mask_slow(
             let close_pos = sq_mask.trailing_zeros();
             quoted_mask |= mask_up_to(close_pos);
             *in_squote = false;
-            remaining &= !(1u64 << close_pos);
+            remaining &= !mask_up_to(close_pos);
         } else {
             return (0, 0);
         }
