@@ -742,12 +742,18 @@ fn eval_predicate_value(
         XPathExpr::NumberLiteral(n) => Ok(XPathValue::Number(*n)),
         XPathExpr::FunctionCall(name, args) => eval_function(index, node, name, args, position, size),
         XPathExpr::LocationPath(path) => {
-            // Special case: @attr — extract attribute value directly
-            if path.steps.len() == 1 && path.steps[0].axis == Axis::Attribute {
+            // Special case: @attr (no predicates) — extract attribute value directly
+            if path.steps.len() == 1
+                && path.steps[0].axis == Axis::Attribute
+                && path.steps[0].predicates.is_empty()
+            {
                 if let XPathNode::Element(idx) = node {
                     if let NodeTest::Name(attr_name) = &path.steps[0].node_test {
-                        if let Some(val) = index.get_attribute(idx, attr_name) {
-                            return Ok(XPathValue::String(val.to_string()));
+                        // Exclude xmlns declarations — they're namespace nodes
+                        if attr_name != "xmlns" && !attr_name.starts_with("xmlns:") {
+                            if let Some(val) = index.get_attribute(idx, attr_name) {
+                                return Ok(XPathValue::String(val.to_string()));
+                            }
                         }
                     }
                 }
