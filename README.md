@@ -24,7 +24,17 @@ Benchmarked on Apple M4 Max (NEON) and AMD Ryzen 9 3950X (AVX2).
 | pugixml | 38.8ms | 2.6x slower |
 | xmllint | 257.7ms | 17.5x slower |
 
-Wins are largest on attribute-dense XML (where SIMD quote masking shines) and multi-gigabyte files (where flat-array memory efficiency dominates). pugixml wins on scalar aggregation queries (`count()`) and text predicates (`contains()`) where its single-pass DOM build has lower overhead. On small files (<1 MB), all native tools are within startup noise.
+**Library parse throughput vs Rust parsers** (M4 Max, criterion, parse only):
+
+| File | simdxml | quick-xml | roxmltree | vs quick-xml |
+|------|---------|-----------|-----------|-------------|
+| PubMed 195 MB (1 thread) | 136ms | 153ms | — | **1.1x** |
+| PubMed 195 MB (4 threads) | 92ms | — | — | — |
+| Attr-heavy 1 MB | 216µs | 859µs | 3,909µs | **4.0x** |
+| Patent XML 1 MB | 218µs | 289µs | 1,921µs | **1.3x** |
+| Tiger SVG 69 KB | 20µs | 31µs | 153µs | **1.6x** |
+
+Wins are largest on attribute-dense XML (where SIMD quote masking shines) and multi-gigabyte files (where flat-array memory efficiency dominates). pugixml wins on scalar aggregation queries (`count()`) and text predicates (`contains()`) where its single-pass DOM build has lower overhead. On small files (<1 MB), all native tools are within startup noise. Unlike quick-xml (streaming events) and roxmltree (read-only DOM), simdxml produces a queryable structural index with XPath support.
 
 ## sxq — CLI tool
 
