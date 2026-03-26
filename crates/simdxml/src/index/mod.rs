@@ -145,41 +145,49 @@ impl<'a> XmlIndex<'a> {
     /// Build precomputed indices for fast XPath evaluation.
     /// Called once after structural parsing. O(n) time, flat memory layout.
     ///
-    /// If close_map/post_order are already populated (e.g., from parallel merge),
-    /// skips those and only builds CSR indices. CSR builds run concurrently.
+    /// Uses threaded CSR builds for large documents (>10K tags) where the
+    /// parallelism benefit exceeds thread spawn overhead (~25µs). Small/medium
+    /// documents use sequential builds to avoid the overhead penalty.
     pub(crate) fn build_indices(&mut self) {
         let n = self.tag_count();
         let need_close_map = self.close_map.is_empty();
 
-        // Shared read-only references for parallel work
+        // Threshold: thread spawn costs ~25µs. Below 10K tags, sequential is faster.
+        if n < 10_000 {
+            let (co, cd) = build_csr_children(&self.tag_types, &self.parents, n);
+            let (tco, tcd) = build_csr_text_children(&self.text_ranges, n);
+            self.child_offsets = co;
+            self.child_data = cd;
+            self.text_child_offsets = tco;
+            self.text_child_data = tcd;
+            if need_close_map {
+                let (cm, po) = build_close_map_and_post_order(&self.tag_types, n);
+                self.close_map = cm;
+                self.post_order = po;
+            }
+            return;
+        }
+
+        // Large documents: run CSR builds concurrently
         let tag_types = &self.tag_types;
         let parents = &self.parents;
         let text_ranges = &self.text_ranges;
 
-        // Run CSR builds (and optionally close_map+post_order) concurrently
         let (child_offsets, child_data, text_child_offsets, text_child_data,
              close_map, post_order) = std::thread::scope(|scope| {
-
-            // Thread 1: CSR child index
             let csr_children = scope.spawn(move || {
                 build_csr_children(tag_types, parents, n)
             });
-
-            // Thread 2: CSR text child index
             let csr_text = scope.spawn(move || {
                 build_csr_text_children(text_ranges, n)
             });
-
-            // Main thread: close_map + post_order (only if not pre-computed)
             let (cm, po) = if need_close_map {
                 build_close_map_and_post_order(tag_types, n)
             } else {
-                (Vec::new(), Vec::new()) // already populated
+                (Vec::new(), Vec::new())
             };
-
             let (co, cd) = csr_children.join().unwrap();
             let (tco, tcd) = csr_text.join().unwrap();
-
             (co, cd, tco, tcd, cm, po)
         });
 

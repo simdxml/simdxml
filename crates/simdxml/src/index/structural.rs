@@ -37,7 +37,8 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
     let mut last_tag_end: usize = 0;
 
     // Fixed-size array stack: no heap alloc, no Option overhead, no capacity checks.
-    const MAX_DEPTH: usize = 4096;
+    // 32 depth = 128 bytes. Real XML rarely exceeds depth 20.
+    const MAX_DEPTH: usize = 32;
     let mut pstack = [0u32; MAX_DEPTH];
     let mut stop: usize = 0;
 
