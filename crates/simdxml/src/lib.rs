@@ -119,12 +119,12 @@
 //! | Platform | SIMD Backend | Status |
 //! |----------|-------------|--------|
 //! | aarch64 (Apple Silicon, ARM) | NEON 128-bit | Production |
-//! | x86_64 | Scalar (memchr-accelerated) | Working |
-//! | x86_64 | SSE4.2 / AVX2 | In progress |
-//! | wasm32 | Scalar | Planned |
+//! | x86_64 | AVX2 256-bit / SSE4.2 128-bit | Production |
+//! | Other | Scalar (memchr-accelerated) | Working |
 //!
 //! The parser automatically selects the best available backend at runtime
-//! (compile-time on aarch64). A scalar fallback is always available.
+//! via `is_x86_feature_detected!` on x86_64 (compile-time on aarch64).
+//! A scalar fallback is always available.
 
 pub mod batch;
 pub mod bloom;

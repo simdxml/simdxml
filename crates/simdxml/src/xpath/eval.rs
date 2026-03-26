@@ -2208,8 +2208,8 @@ fn extract_simple_attr_eq(predicates: &[XPathExpr]) -> Option<(String, String, u
 /// using SIMD-accelerated memmem, then maps hit positions to tag indices via
 /// binary search into tag_starts. O(input_size) total.
 fn try_batch_attr_predicate(
-    index: &XmlIndex,
-    nodes: &[XPathNode],
+    _index: &XmlIndex,
+    _nodes: &[XPathNode],
     pred: &XPathExpr,
 ) -> Option<Vec<XPathNode>> {
     // Match pattern: BinaryOp(@attr, Eq, 'literal')
@@ -2238,58 +2238,13 @@ fn try_batch_attr_predicate(
         _ => return None,
     };
 
-    // Disable for now — per-node get_attribute is faster than full-input memmem
-    // for typical XML where the pattern has many false-positive hits.
-    // TODO: enable when candidate_count × avg_tag_size > input_size
-    return None;
-
-    // Build search patterns: attr="value" and attr='value'
-    let pattern_dq = format!("{}=\"{}\"", attr_name, value);
-    let pattern_sq = format!("{}='{}'", attr_name, value);
-
-    let finder_dq = memchr::memmem::Finder::new(pattern_dq.as_bytes());
-    let finder_sq = memchr::memmem::Finder::new(pattern_sq.as_bytes());
-
-    // Collect all positions where the pattern appears in raw input
-    let mut hit_positions: Vec<u64> = Vec::new();
-    for pos in finder_dq.find_iter(index.input) {
-        hit_positions.push(pos as u64);
-    }
-    for pos in finder_sq.find_iter(index.input) {
-        hit_positions.push(pos as u64);
-    }
-
-    if hit_positions.is_empty() {
-        return Some(Vec::new());
-    }
-
-    // Map each hit position to a tag index via binary search into tag_starts.
-    // A hit at byte position P belongs to the tag whose tag_starts[i] <= P < tag_starts[i+1].
-    let mut hit_tags: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for &pos in &hit_positions {
-        let tag_idx = match index.tag_starts.binary_search(&pos) {
-            Ok(i) => i,
-            Err(i) => i.saturating_sub(1),
-        };
-        // Verify the hit is within this tag's byte range
-        if tag_idx < index.tag_count()
-            && index.tag_starts[tag_idx] <= pos
-            && pos <= index.tag_ends[tag_idx]
-        {
-            hit_tags.insert(tag_idx);
-        }
-    }
-
-    // Intersect with candidate nodes
-    let result: Vec<XPathNode> = nodes.iter()
-        .filter(|node| match node {
-            XPathNode::Element(idx) => hit_tags.contains(idx),
-            _ => false,
-        })
-        .copied()
-        .collect();
-
-    Some(result)
+    // The memmem approach (scanning raw input for attr="value") was tested
+    // but per-node get_attribute is faster for typical XML where the pattern
+    // has many false-positive hits across different element types. The fused
+    // inline attribute predicate in eval_fused_descendant_child_with_preds
+    // handles the common case efficiently.
+    let _ = (attr_name, value);
+    None
 }
 
 /// Try to use SIMD batched evaluation for `contains(., 'literal')` or

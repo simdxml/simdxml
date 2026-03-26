@@ -6,13 +6,25 @@ Parses XML into flat arrays instead of a DOM tree using structural indexing adap
 
 ## Performance
 
-| Benchmark | sxq | pugixml (C++) | xmllint (C) | Speedup |
-|-----------|-----|---------------|-------------|---------|
-| DBLP 5.1 GB | 3.2s | 8.3s | - | **2.6x** |
-| PubMed 195 MB | 107ms | 174ms | 831ms | **1.6x** / **7.8x** |
-| Attr-heavy 10 MB | 7.8ms | 13.1ms | 138ms | **1.7x** / **17.7x** |
+Benchmarked on Apple M4 Max (NEON) and AMD Ryzen 9 3950X (AVX2).
 
-Parse throughput: **2.3 GB/s** (parallel, 8 threads) on real-world medical XML.
+**End-to-end XPath queries (M4 Max, NEON):**
+
+| Benchmark | sxq | pugixml | xmllint | vs pugixml |
+|-----------|-----|---------|---------|-----------|
+| DBLP 5.1 GB (`//article`) | 3.2s | 8.3s | — | **2.6x** |
+| PubMed 195 MB (`//MeshHeading`) | 130ms | 174ms | 831ms | **1.3x** |
+| Attr-heavy 10 MB (`//record`) | 7.8ms | 13.1ms | 138ms | **1.7x** |
+
+**Attribute-heavy XML (Ryzen 9 3950X, AVX2):**
+
+| Tool | Time | vs sxq |
+|------|------|--------|
+| sxq | 14.7ms | — |
+| pugixml | 38.8ms | 2.6x slower |
+| xmllint | 257.7ms | 17.5x slower |
+
+Wins are largest on attribute-dense XML (where SIMD quote masking shines) and multi-gigabyte files (where flat-array memory efficiency dominates). pugixml wins on scalar aggregation queries (`count()`) and text predicates (`contains()`) where its single-pass DOM build has lower overhead. On small files (<1 MB), all native tools are within startup noise. See the [paper](paper/) for detailed per-query analysis with confidence intervals.
 
 ## sxq — CLI tool
 
@@ -80,9 +92,8 @@ Additional features: parallel parsing across cores, lazy index building, bloom f
 | Platform | SIMD Backend | Status |
 |----------|-------------|--------|
 | aarch64 (Apple Silicon, ARM) | NEON 128-bit | Production |
-| x86_64 | Scalar (memchr-accelerated) | Working |
-| x86_64 | SSE4.2 / AVX2 | In progress |
-| wasm32 | Scalar | Planned |
+| x86_64 | AVX2 256-bit / SSE4.2 128-bit | Production |
+| Other | Scalar (memchr-accelerated) | Working |
 
 ## Project Structure
 

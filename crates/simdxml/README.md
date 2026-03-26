@@ -6,15 +6,25 @@ Uses a two-pass structural indexing architecture (adapted from [simdjson](https:
 
 ## Performance
 
-Benchmarked against pugixml (C++), libxml2 (C), quick-xml (Rust), and others:
+Benchmarked on Apple M4 Max (NEON) and AMD Ryzen 9 3950X (AVX2) against pugixml (C++), libxml2 (C), and others.
 
-| File | simdxml | pugixml | Speedup |
-|------|---------|---------|---------|
+**Where simdxml wins** — large files and attribute-dense XML:
+
+| Benchmark | simdxml | pugixml | Speedup |
+|-----------|---------|---------|---------|
 | DBLP 5.1 GB | 3.2s | 8.3s | **2.6x** |
-| PubMed 195 MB | 107ms | 174ms | **1.6x** |
-| Attr-heavy 10 MB | 7.8ms | 13.1ms | **1.7x** |
+| Attr-heavy 10 MB (ARM) | 7.8ms | 13.1ms | **1.7x** |
+| Attr-heavy 10 MB (x86) | 14.7ms | 38.8ms | **2.6x** |
 
-Parse throughput: **2.3 GB/s** (8 threads) on real-world medical XML.
+**Where it's close** — text-heavy XML, simple queries:
+
+| Benchmark | simdxml | pugixml | |
+|-----------|---------|---------|---|
+| PubMed descendant query | 130ms | 174ms | 1.3x faster |
+| PubMed `count()` | 133ms | 117ms | pugixml wins |
+| PubMed `contains()` | 162ms | 148ms | pugixml wins |
+
+pugixml's single-pass DOM build has lower overhead for queries where parse time dominates. simdxml's advantage grows with file size and attribute density.
 
 ## Quick Start
 
@@ -36,7 +46,7 @@ assert_eq!(titles, vec!["Rust"]);
 
 ## Features
 
-- **SIMD structural indexing** — NEON (aarch64), with SSE4.2/AVX2 (x86_64) in progress
+- **SIMD structural indexing** — NEON (aarch64), SSE4.2/AVX2 (x86_64), scalar fallback
 - **Full XPath 1.0** — all 13 axes, predicates, functions, operators. 327/327 libxml2 conformance, 1015/1023 pugixml conformance
 - **Flat-array index** — ~16 bytes/tag vs ~35 for a DOM tree. Cache-friendly for repeated queries
 - **Parallel parsing** — split large files across cores with `parallel::parse_parallel`
@@ -106,7 +116,7 @@ Install: `cargo install simdxml-cli`
 | Platform | SIMD | Status |
 |----------|------|--------|
 | aarch64 (Apple Silicon, ARM) | NEON 128-bit | Production |
-| x86_64 | Scalar (memchr) | Working, SSE4.2/AVX2 in progress |
+| x86_64 | AVX2 256-bit / SSE4.2 128-bit | Production |
 | Other | Scalar fallback | Working |
 
 ## License
