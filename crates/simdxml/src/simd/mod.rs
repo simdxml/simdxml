@@ -9,16 +9,19 @@
 //! - x86_64: AVX2 (256-bit, 32 bytes/vector) — future
 //! - Fallback: scalar (current memchr-based parser)
 
-pub(crate) mod scalar;
+#[doc(hidden)]
+pub mod scalar;
 
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
 
 #[cfg(target_arch = "x86_64")]
-pub(crate) mod sse42;
+#[doc(hidden)]
+pub mod sse42;
 
 #[cfg(target_arch = "x86_64")]
-pub(crate) mod avx2;
+#[doc(hidden)]
+pub mod avx2;
 
 /// Structural positions extracted from SIMD classification.
 /// Each u64 is a bitmask over a 64-byte chunk of input.
@@ -83,10 +86,14 @@ pub fn classify_structural(input: &[u8]) -> StructuralIndex {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
-            return avx2::classify_avx2(input);
+            // Safety: AVX2 availability checked above
+            return unsafe { avx2::classify_avx2(input) };
         }
-        // SSE4.2 is baseline for x86_64, but check anyway
-        return sse42::classify_sse42(input);
+        if is_x86_feature_detected!("sse4.2") {
+            // Safety: SSE4.2 availability checked above
+            return unsafe { sse42::classify_sse42(input) };
+        }
+        return scalar::classify_scalar(input);
     }
 
     // Universal scalar fallback for other architectures

@@ -36,10 +36,35 @@ fn bench_parse_throughput(c: &mut Criterion) {
             });
         });
 
-        // simdxml two-stage (NEON classifier + bitmask walker)
-        group.bench_function("simdxml_neon", |b| {
+        // simdxml two-stage (best SIMD classifier + bitmask walker)
+        group.bench_function("simdxml_two_stage", |b| {
             b.iter(|| {
                 let _ = simdxml::index::structural::parse_two_stage(&data).unwrap();
+            });
+        });
+
+        // Stage 1 only: AVX2 classifier
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            group.bench_function("classify_avx2", |b| {
+                b.iter(|| {
+                    let _ = unsafe { simdxml::simd::avx2::classify_avx2(&data) };
+                });
+            });
+        }
+
+        // Stage 1 only: SSE4.2 classifier
+        #[cfg(target_arch = "x86_64")]
+        group.bench_function("classify_sse42", |b| {
+            b.iter(|| {
+                let _ = unsafe { simdxml::simd::sse42::classify_sse42(&data) };
+            });
+        });
+
+        // Stage 1 only: scalar classifier
+        group.bench_function("classify_scalar", |b| {
+            b.iter(|| {
+                let _ = simdxml::simd::scalar::classify_scalar(&data);
             });
         });
 

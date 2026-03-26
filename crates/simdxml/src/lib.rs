@@ -132,7 +132,8 @@ pub mod error;
 pub mod index;
 pub mod parallel;
 pub mod persist;
-pub(crate) mod simd;
+#[doc(hidden)]
+pub mod simd;
 pub mod xpath;
 
 pub use bloom::TagBloom;
