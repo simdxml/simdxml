@@ -14,16 +14,16 @@ pub struct XmlIndex<'a> {
     pub(crate) input: &'a [u8],
 
     /// Byte offset of each '<' (start of each tag/comment/PI)
-    pub(crate) tag_starts: Vec<u32>,
+    pub(crate) tag_starts: Vec<u64>,
 
     /// Byte offset of each '>' (end of each tag/comment/PI)
-    pub(crate) tag_ends: Vec<u32>,
+    pub(crate) tag_ends: Vec<u64>,
 
     /// Tag type classification
     pub tag_types: Vec<TagType>,
 
     /// Tag name: (byte offset, length) into input
-    pub(crate) tag_names: Vec<(u32, u16)>,
+    pub(crate) tag_names: Vec<(u64, u16)>,
 
     /// Nesting depth of each tag (0 = root level)
     pub depths: Vec<u16>,
@@ -59,7 +59,7 @@ pub struct XmlIndex<'a> {
     /// Interned name ID per tag. Same name → same ID. u16::MAX = no name.
     pub(crate) name_ids: Vec<u16>,
     /// Unique name strings: name_id → (byte_offset, length) in input.
-    pub(crate) name_table: Vec<(u32, u16)>,
+    pub(crate) name_table: Vec<(u64, u16)>,
     /// Inverted index: name_id → sorted list of tag indices (Open/SelfClose only).
     pub(crate) name_posting: Vec<Vec<u32>>,
 }
@@ -95,7 +95,7 @@ impl TagType {
 /// Zero heap allocation per intern call — just byte comparison.
 pub(crate) struct NameInterner<'a> {
     input: &'a [u8],
-    table: Vec<(u32, u16)>,
+    table: Vec<(u64, u16)>,
     map: Option<std::collections::HashMap<u64, u16>>,
 }
 
@@ -114,7 +114,7 @@ impl<'a> NameInterner<'a> {
     /// Intern a name, returning its ID.
     /// Linear scan for <256 unique names, hash map above that.
     #[inline]
-    pub fn intern(&mut self, name_bytes: &[u8], offset: u32, len: u16) -> u16 {
+    pub fn intern(&mut self, name_bytes: &[u8], offset: u64, len: u16) -> u16 {
         if let Some(ref map) = self.map {
             let hash = Self::fnv1a(name_bytes);
             if let Some(&id) = map.get(&hash) {
@@ -152,7 +152,7 @@ impl<'a> NameInterner<'a> {
         id
     }
 
-    pub fn into_table(self) -> Vec<(u32, u16)> {
+    pub fn into_table(self) -> Vec<(u64, u16)> {
         self.table
     }
 }
@@ -162,9 +162,9 @@ impl<'a> NameInterner<'a> {
 #[repr(C)]
 pub struct TextRange {
     /// Byte offset of text start
-    pub start: u32,
+    pub start: u64,
     /// Byte offset of text end (exclusive)
-    pub end: u32,
+    pub end: u64,
     /// Index of the parent open tag
     pub parent_tag: u32,
 }
@@ -347,7 +347,7 @@ impl<'a> XmlIndex<'a> {
             return "";
         }
         let (offset, len) = self.tag_names[tag_idx];
-        let bytes = &self.input[offset as usize..(offset + len as u32) as usize];
+        let bytes = &self.input[offset as usize..(offset + len as u64) as usize];
         // Safety: XML input is validated during parsing; tag names are always valid UTF-8.
         unsafe { std::str::from_utf8_unchecked(bytes) }
     }

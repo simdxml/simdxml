@@ -671,13 +671,13 @@ fn dedup_nodes(nodes: &mut Vec<XPathNode>) {
     });
 }
 
-fn node_doc_pos(index: &XmlIndex, node: &XPathNode) -> u32 {
+fn node_doc_pos(index: &XmlIndex, node: &XPathNode) -> u64 {
     match node {
         XPathNode::Element(idx) if *idx < index.tag_count() => index.tag_starts[*idx],
         XPathNode::Text(idx) if *idx < index.text_ranges.len() => index.text_ranges[*idx].start,
         XPathNode::Attribute(idx, _) if *idx < index.tag_count() => index.tag_starts[*idx],
         XPathNode::Namespace(idx, _) if *idx < index.tag_count() => index.tag_starts[*idx],
-        _ => u32::MAX,
+        _ => u64::MAX,
     }
 }
 
@@ -1641,7 +1641,7 @@ fn eval_child_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
 
     if parent_idx == DOC_ROOT {
         // Document root's children are depth-0 elements/comments/PIs
-        let mut children_with_pos: Vec<(u32, XPathNode)> = Vec::new();
+        let mut children_with_pos: Vec<(u64, XPathNode)> = Vec::new();
         for i in 0..index.tag_count() {
             if index.depths[i] == 0 && is_node_tag(index.tag_types[i])
                 && index.tag_types[i] != TagType::Close
@@ -1657,7 +1657,7 @@ fn eval_child_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
     // Falls back to linear scan for small documents (no CSR built).
     if !index.has_indices() {
         // Linear scan fallback for small documents
-        let mut children_with_pos: Vec<(u32, XPathNode)> = Vec::new();
+        let mut children_with_pos: Vec<(u64, XPathNode)> = Vec::new();
         for i in 0..index.tag_count() {
             if index.parents[i] == parent_idx as u32 && is_node_tag(index.tag_types[i]) {
                 children_with_pos.push((index.tag_starts[i], XPathNode::Element(i)));
@@ -1719,7 +1719,7 @@ fn eval_descendant_axis(index: &XmlIndex, node: XPathNode, include_self: bool) -
 
     if start_idx == DOC_ROOT {
         // Descendants of document root = all node types, in document order
-        let mut items: Vec<(u32, XPathNode)> = Vec::new();
+        let mut items: Vec<(u64, XPathNode)> = Vec::new();
         if include_self {
             items.push((0, XPathNode::Element(DOC_ROOT)));
         }
@@ -1739,7 +1739,7 @@ fn eval_descendant_axis(index: &XmlIndex, node: XPathNode, include_self: bool) -
         return items.into_iter().map(|(_, node)| node).collect();
     }
 
-    let mut items: Vec<(u32, XPathNode)> = Vec::new();
+    let mut items: Vec<(u64, XPathNode)> = Vec::new();
     if include_self {
         items.push((index.tag_starts[start_idx], node));
     }

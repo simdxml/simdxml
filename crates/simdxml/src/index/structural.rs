@@ -52,8 +52,8 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
         let text_start = if last_tag_end > 0 { last_tag_end + 1 } else { 0 };
         if text_start < pos {
             index.text_ranges.push(TextRange {
-                start: text_start as u32,
-                end: pos as u32,
+                start: text_start as u64,
+                end: pos as u64,
                 parent_tag: cp,
             });
         }
@@ -84,10 +84,10 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                     if depth > 0 { depth -= 1; }
                     if stop > 0 { stop -= 1; }
 
-                    index.tag_starts.push(tag_start as u32);
-                    index.tag_ends.push(pos as u32);
+                    index.tag_starts.push(tag_start as u64);
+                    index.tag_ends.push(pos as u64);
                     index.tag_types.push(TagType::Close);
-                    index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
+                    index.tag_names.push((name_start as u64, (name_end - name_start) as u16));
                     index.depths.push(depth);
                     index.parents.push(if stop == 0 { u32::MAX } else if stop <= MAX_DEPTH { pstack[stop - 1] } else { u32::MAX });
 
@@ -97,7 +97,7 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                 b'!' => {
                     if input.get(pos + 2..pos + 4) == Some(b"--") {
                         // Comment: <!-- ... -->
-                        index.tag_starts.push(tag_start as u32);
+                        index.tag_starts.push(tag_start as u64);
                         index.tag_types.push(TagType::Comment);
                         index.tag_names.push((0, 0));
                         index.depths.push(depth);
@@ -118,12 +118,12 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                                 break;
                             }
                         }
-                        index.tag_ends.push(pos as u32);
+                        index.tag_ends.push(pos as u64);
                         last_tag_end = pos;
                         pos += 1;
                     } else if input.get(pos + 2..pos + 9) == Some(b"[CDATA[") {
                         // CDATA: <![CDATA[ ... ]]>
-                        index.tag_starts.push(tag_start as u32);
+                        index.tag_starts.push(tag_start as u64);
                         index.tag_types.push(TagType::CData);
                         index.tag_names.push((0, 0));
                         index.depths.push(depth);
@@ -138,8 +138,8 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                                 if pos + 2 < input.len() && &input[pos..pos + 3] == b"]]>" {
                                     if pos > content_start {
                                         index.text_ranges.push(TextRange {
-                                            start: content_start as u32,
-                                            end: pos as u32,
+                                            start: content_start as u64,
+                                            end: pos as u64,
                                             parent_tag: cp,
                                         });
                                     }
@@ -151,7 +151,7 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                                 break;
                             }
                         }
-                        index.tag_ends.push(pos as u32);
+                        index.tag_ends.push(pos as u64);
                         last_tag_end = pos;
                         pos += 1;
                     } else {
@@ -176,9 +176,9 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                     }
                     let name_end = pos;
 
-                    index.tag_starts.push(tag_start as u32);
+                    index.tag_starts.push(tag_start as u64);
                     index.tag_types.push(TagType::PI);
-                    index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
+                    index.tag_names.push((name_start as u64, (name_end - name_start) as u16));
                     index.depths.push(depth);
                     index.parents.push(cp);
 
@@ -190,7 +190,7 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                         }
                         pos += 1;
                     }
-                    index.tag_ends.push(pos as u32);
+                    index.tag_ends.push(pos as u64);
                     last_tag_end = pos;
                     pos += 1;
                 }
@@ -238,10 +238,10 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
 
                     let tag_idx = index.tag_starts.len() as u32;
 
-                    index.tag_starts.push(tag_start as u32);
-                    index.tag_ends.push(pos as u32);
+                    index.tag_starts.push(tag_start as u64);
+                    index.tag_ends.push(pos as u64);
                     index.tag_types.push(tag_type);
-                    index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
+                    index.tag_names.push((name_start as u64, (name_end - name_start) as u16));
                     index.depths.push(depth);
                     index.parents.push(cp);
 
@@ -307,8 +307,8 @@ pub fn parse_two_stage<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
         if text_start < lt_pos {
             let parent = parent_stack.last().copied().unwrap_or(u32::MAX);
             index.text_ranges.push(TextRange {
-                start: text_start as u32,
-                end: lt_pos as u32,
+                start: text_start as u64,
+                end: lt_pos as u64,
                 parent_tag: parent,
             });
         }
@@ -338,10 +338,10 @@ pub fn parse_two_stage<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                 if depth > 0 { depth -= 1; }
                 parent_stack.pop();
 
-                index.tag_starts.push(tag_start as u32);
-                index.tag_ends.push(gt_pos as u32);
+                index.tag_starts.push(tag_start as u64);
+                index.tag_ends.push(gt_pos as u64);
                 index.tag_types.push(TagType::Close);
-                index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
+                index.tag_names.push((name_start as u64, (name_end - name_start) as u16));
                 index.depths.push(depth);
                 index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
 
@@ -360,8 +360,8 @@ pub fn parse_two_stage<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                         end += 1;
                     }
 
-                    index.tag_starts.push(tag_start as u32);
-                    index.tag_ends.push(end as u32);
+                    index.tag_starts.push(tag_start as u64);
+                    index.tag_ends.push(end as u64);
                     index.tag_types.push(TagType::Comment);
                     index.tag_names.push((0, 0));
                     index.depths.push(depth);
@@ -381,8 +381,8 @@ pub fn parse_two_stage<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                             let parent = parent_stack.last().copied().unwrap_or(u32::MAX);
                             if end > content_start {
                                 index.text_ranges.push(TextRange {
-                                    start: content_start as u32,
-                                    end: end as u32,
+                                    start: content_start as u64,
+                                    end: end as u64,
                                     parent_tag: parent,
                                 });
                             }
@@ -392,8 +392,8 @@ pub fn parse_two_stage<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                         end += 1;
                     }
 
-                    index.tag_starts.push(tag_start as u32);
-                    index.tag_ends.push(end as u32);
+                    index.tag_starts.push(tag_start as u64);
+                    index.tag_ends.push(end as u64);
                     index.tag_types.push(TagType::CData);
                     index.tag_names.push((0, 0));
                     index.depths.push(depth);
@@ -430,10 +430,10 @@ pub fn parse_two_stage<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                     end += 1;
                 }
 
-                index.tag_starts.push(tag_start as u32);
-                index.tag_ends.push(end as u32);
+                index.tag_starts.push(tag_start as u64);
+                index.tag_ends.push(end as u64);
                 index.tag_types.push(TagType::PI);
-                index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
+                index.tag_names.push((name_start as u64, (name_end - name_start) as u16));
                 index.depths.push(depth);
                 index.parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
 
@@ -461,10 +461,10 @@ pub fn parse_two_stage<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
                 let tag_idx = index.tag_starts.len() as u32;
                 let parent = parent_stack.last().copied().unwrap_or(u32::MAX);
 
-                index.tag_starts.push(tag_start as u32);
-                index.tag_ends.push(gt_pos as u32);
+                index.tag_starts.push(tag_start as u64);
+                index.tag_ends.push(gt_pos as u64);
                 index.tag_types.push(tag_type);
-                index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
+                index.tag_names.push((name_start as u64, (name_end - name_start) as u16));
                 index.depths.push(depth);
                 index.parents.push(parent);
 

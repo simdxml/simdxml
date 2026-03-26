@@ -63,10 +63,10 @@ pub fn parse_parallel<'a>(input: &'a [u8], num_threads: usize) -> Result<XmlInde
 
 /// A single chunk's parse results (no depth/parent — those need global state).
 struct ChunkResult {
-    tag_starts: Vec<u32>,
-    tag_ends: Vec<u32>,
+    tag_starts: Vec<u64>,
+    tag_ends: Vec<u64>,
     tag_types: Vec<TagType>,
-    tag_names: Vec<(u32, u16)>,
+    tag_names: Vec<(u64, u16)>,
     text_ranges: Vec<TextRange>,
 }
 
@@ -168,8 +168,8 @@ fn parse_chunk<'a>(
             let text_start = if last_tag_end > 0 { last_tag_end + 1 } else { 0 };
             if text_start < tag_start {
                 result.text_ranges.push(TextRange {
-                    start: (chunk_start + text_start) as u32,
-                    end: abs_pos as u32,
+                    start: (chunk_start + text_start) as u64,
+                    end: abs_pos as u64,
                     parent_tag: u32::MAX, // placeholder — resolved during merge
                 });
             }
@@ -195,10 +195,10 @@ fn parse_chunk<'a>(
                     break;
                 }
 
-                result.tag_starts.push(abs_pos as u32);
-                result.tag_ends.push((chunk_start + pos) as u32);
+                result.tag_starts.push(abs_pos as u64);
+                result.tag_ends.push((chunk_start + pos) as u64);
                 result.tag_types.push(TagType::Close);
-                result.tag_names.push(((chunk_start + name_start) as u32, (name_end - name_start) as u16));
+                result.tag_names.push(((chunk_start + name_start) as u64, (name_end - name_start) as u16));
 
                 last_tag_end = pos;
                 pos += 1;
@@ -206,7 +206,7 @@ fn parse_chunk<'a>(
             b'!' => {
                 if chunk.get(pos + 2..pos + 4) == Some(b"--") {
                     // Comment
-                    result.tag_starts.push(abs_pos as u32);
+                    result.tag_starts.push(abs_pos as u64);
                     result.tag_types.push(TagType::Comment);
                     result.tag_names.push((0, 0));
 
@@ -224,12 +224,12 @@ fn parse_chunk<'a>(
                             break;
                         }
                     }
-                    result.tag_ends.push((chunk_start + pos) as u32);
+                    result.tag_ends.push((chunk_start + pos) as u64);
                     last_tag_end = pos;
                     pos += 1;
                 } else if chunk.get(pos + 2..pos + 9) == Some(b"[CDATA[") {
                     // CDATA
-                    result.tag_starts.push(abs_pos as u32);
+                    result.tag_starts.push(abs_pos as u64);
                     result.tag_types.push(TagType::CData);
                     result.tag_names.push((0, 0));
 
@@ -241,8 +241,8 @@ fn parse_chunk<'a>(
                             if pos + 2 < chunk.len() && &chunk[pos..pos + 3] == b"]]>" {
                                 if pos > content_start {
                                     result.text_ranges.push(TextRange {
-                                        start: (chunk_start + content_start) as u32,
-                                        end: (chunk_start + pos) as u32,
+                                        start: (chunk_start + content_start) as u64,
+                                        end: (chunk_start + pos) as u64,
                                         parent_tag: u32::MAX,
                                     });
                                 }
@@ -254,7 +254,7 @@ fn parse_chunk<'a>(
                             break;
                         }
                     }
-                    result.tag_ends.push((chunk_start + pos) as u32);
+                    result.tag_ends.push((chunk_start + pos) as u64);
                     last_tag_end = pos;
                     pos += 1;
                 } else {
@@ -279,9 +279,9 @@ fn parse_chunk<'a>(
                 }
                 let name_end = pos;
 
-                result.tag_starts.push(abs_pos as u32);
+                result.tag_starts.push(abs_pos as u64);
                 result.tag_types.push(TagType::PI);
-                result.tag_names.push(((chunk_start + name_start) as u32, (name_end - name_start) as u16));
+                result.tag_names.push(((chunk_start + name_start) as u64, (name_end - name_start) as u16));
 
                 while pos + 1 < chunk.len() {
                     if chunk[pos] == b'?' && chunk[pos + 1] == b'>' {
@@ -290,7 +290,7 @@ fn parse_chunk<'a>(
                     }
                     pos += 1;
                 }
-                result.tag_ends.push((chunk_start + pos) as u32);
+                result.tag_ends.push((chunk_start + pos) as u64);
                 last_tag_end = pos;
                 pos += 1;
             }
@@ -330,10 +330,10 @@ fn parse_chunk<'a>(
 
                 let tag_type = if self_closing { TagType::SelfClose } else { TagType::Open };
 
-                result.tag_starts.push(abs_pos as u32);
-                result.tag_ends.push((chunk_start + pos) as u32);
+                result.tag_starts.push(abs_pos as u64);
+                result.tag_ends.push((chunk_start + pos) as u64);
                 result.tag_types.push(tag_type);
-                result.tag_names.push(((chunk_start + name_start) as u32, (name_end - name_start) as u16));
+                result.tag_names.push(((chunk_start + name_start) as u64, (name_end - name_start) as u16));
 
                 last_tag_end = pos;
                 pos += 1;

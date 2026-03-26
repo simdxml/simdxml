@@ -32,7 +32,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 const MAGIC: [u8; 4] = *b"SXI\x01";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_SIZE: usize = 64;
 const NUM_SECTIONS: usize = 14;
 const OFFSET_TABLE_SIZE: usize = NUM_SECTIONS * 8;
@@ -104,13 +104,13 @@ pub fn serialize_index(
     // === Compute section sizes and offsets ===
     // Section sizes in bytes — use actual Vec lengths to stay in sync with writes
     let section_sizes: [usize; NUM_SECTIONS] = [
-        index.tag_starts.len() * 4,             // 0: tag_starts (u32)
-        index.tag_ends.len() * 4,               // 1: tag_ends (u32)
+        index.tag_starts.len() * 8,             // 0: tag_starts (u64)
+        index.tag_ends.len() * 8,               // 1: tag_ends (u64)
         index.tag_types.len(),                   // 2: tag_types (u8)
-        index.tag_names.len() * 6,              // 3: tag_names ((u32, u16) = 6 bytes)
+        index.tag_names.len() * 10,             // 3: tag_names ((u64, u16) = 10 bytes)
         index.depths.len() * 2,                 // 4: depths (u16)
         index.parents.len() * 4,                // 5: parents (u32)
-        index.text_ranges.len() * 12,           // 6: text_ranges (3 x u32 = 12 bytes)
+        index.text_ranges.len() * 20,           // 6: text_ranges (2 x u64 + u32 = 20 bytes)
         index.child_offsets.len() * 4,          // 7: child_offsets (u32)
         index.child_data.len() * 4,             // 8: child_data (u32)
         index.text_child_offsets.len() * 4,     // 9: text_child_offsets (u32)
@@ -136,17 +136,17 @@ pub fn serialize_index(
     // === Write sections ===
 
     // 0: tag_starts
-    write_u32_slice(&mut w, &index.tag_starts)?;
+    write_u64_slice(&mut w, &index.tag_starts)?;
 
     // 1: tag_ends
-    write_u32_slice(&mut w, &index.tag_ends)?;
+    write_u64_slice(&mut w, &index.tag_ends)?;
 
     // 2: tag_types (as u8)
     for &tt in &index.tag_types {
         w.write_all(&[tt as u8])?;
     }
 
-    // 3: tag_names ((u32, u16) pairs)
+    // 3: tag_names ((u64, u16) pairs)
     for &(off, len) in &index.tag_names {
         w.write_all(&off.to_le_bytes())?;
         w.write_all(&len.to_le_bytes())?;
@@ -158,11 +158,11 @@ pub fn serialize_index(
     // 5: parents
     write_u32_slice(&mut w, &index.parents)?;
 
-    // 6: text_ranges
+    // 6: text_ranges (u64 start, u64 end, u32 parent_tag)
     for range in &index.text_ranges {
-        w.write_all(&range.start.to_le_bytes())?;
-        w.write_all(&range.end.to_le_bytes())?;
-        w.write_all(&range.parent_tag.to_le_bytes())?;
+        w.write_all(&range.start.to_le_bytes())?;  // u64
+        w.write_all(&range.end.to_le_bytes())?;    // u64
+        w.write_all(&range.parent_tag.to_le_bytes())?;  // u32
     }
 
     // 7: child_offsets
@@ -308,8 +308,8 @@ fn load_index_with_xml(
 
     // === Read sections into Vecs ===
 
-    let tag_starts = read_u32_vec(section(0), tag_count);
-    let tag_ends = read_u32_vec(section(1), tag_count);
+    let tag_starts = read_u64_vec(section(0), tag_count);
+    let tag_ends = read_u64_vec(section(1), tag_count);
 
     let tag_types: Vec<TagType> = section(2)[..tag_count]
         .iter()
@@ -391,6 +391,13 @@ fn write_u32_slice(w: &mut impl Write, data: &[u32]) -> Result<()> {
     Ok(())
 }
 
+fn write_u64_slice(w: &mut impl Write, data: &[u64]) -> Result<()> {
+    for &v in data {
+        w.write_all(&v.to_le_bytes())?;
+    }
+    Ok(())
+}
+
 fn write_u16_slice(w: &mut impl Write, data: &[u16]) -> Result<()> {
     for &v in data {
         w.write_all(&v.to_le_bytes())?;
@@ -405,11 +412,11 @@ fn compute_name_section_size(index: &XmlIndex) -> usize {
     let n = index.tag_count();
     let name_count = index.name_table.len();
     // name_ids: n x u16
-    // name_table: name_count x (u32 + u16) = 6 bytes each
+    // name_table: name_count x (u64 + u16) = 10 bytes each
     // posting_offsets: (name_count + 1) x u32
     // posting_data: total entries x u32
     let total_posting: usize = index.name_posting.iter().map(|p| p.len()).sum();
-    n * 2 + name_count * 6 + (name_count + 1) * 4 + total_posting * 4
+    n * 2 + name_count * 10 + (name_count + 1) * 4 + total_posting * 4
 }
 
 fn write_name_section(w: &mut impl Write, index: &XmlIndex) -> Result<()> {
@@ -446,6 +453,16 @@ fn write_name_section(w: &mut impl Write, index: &XmlIndex) -> Result<()> {
 
 // === Deserialization helpers ===
 
+fn read_u64_vec(data: &[u8], count: usize) -> Vec<u64> {
+    let mut v = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = i * 8;
+        if base + 8 > data.len() { break; }
+        v.push(u64::from_le_bytes(data[base..base + 8].try_into().unwrap()));
+    }
+    v
+}
+
 fn read_u32_vec(data: &[u8], count: usize) -> Vec<u32> {
     let mut v = Vec::with_capacity(count);
     for i in 0..count {
@@ -466,13 +483,13 @@ fn read_u16_vec(data: &[u8], count: usize) -> Vec<u16> {
     v
 }
 
-fn read_tag_names(data: &[u8], count: usize) -> Vec<(u32, u16)> {
+fn read_tag_names(data: &[u8], count: usize) -> Vec<(u64, u16)> {
     let mut v = Vec::with_capacity(count);
     for i in 0..count {
-        let base = i * 6;
-        if base + 6 > data.len() { break; }
-        let off = u32::from_le_bytes(data[base..base + 4].try_into().unwrap());
-        let len = u16::from_le_bytes(data[base + 4..base + 6].try_into().unwrap());
+        let base = i * 10;
+        if base + 10 > data.len() { break; }
+        let off = u64::from_le_bytes(data[base..base + 8].try_into().unwrap());
+        let len = u16::from_le_bytes(data[base + 8..base + 10].try_into().unwrap());
         v.push((off, len));
     }
     v
@@ -481,12 +498,12 @@ fn read_tag_names(data: &[u8], count: usize) -> Vec<(u32, u16)> {
 fn read_text_ranges(data: &[u8], count: usize) -> Vec<TextRange> {
     let mut v = Vec::with_capacity(count);
     for i in 0..count {
-        let base = i * 12;
-        if base + 12 > data.len() { break; }
+        let base = i * 20;
+        if base + 20 > data.len() { break; }
         v.push(TextRange {
-            start: u32::from_le_bytes(data[base..base + 4].try_into().unwrap()),
-            end: u32::from_le_bytes(data[base + 4..base + 8].try_into().unwrap()),
-            parent_tag: u32::from_le_bytes(data[base + 8..base + 12].try_into().unwrap()),
+            start: u64::from_le_bytes(data[base..base + 8].try_into().unwrap()),
+            end: u64::from_le_bytes(data[base + 8..base + 16].try_into().unwrap()),
+            parent_tag: u32::from_le_bytes(data[base + 16..base + 20].try_into().unwrap()),
         });
     }
     v
@@ -496,16 +513,16 @@ fn read_name_section(
     data: &[u8],
     tag_count: usize,
     name_count: usize,
-) -> (Vec<u16>, Vec<(u32, u16)>, Vec<Vec<u32>>) {
+) -> (Vec<u16>, Vec<(u64, u16)>, Vec<Vec<u32>>) {
     let mut pos = 0;
 
     // name_ids: tag_count x u16
     let name_ids = read_u16_vec(&data[pos..], tag_count);
     pos += tag_count * 2;
 
-    // name_table: name_count x (u32 + u16)
+    // name_table: name_count x (u64 + u16)
     let name_table = read_tag_names(&data[pos..], name_count);
-    pos += name_count * 6;
+    pos += name_count * 10;
 
     // posting offsets: (name_count + 1) x u32
     let posting_offsets = read_u32_vec(&data[pos..], name_count + 1);

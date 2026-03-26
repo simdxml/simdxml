@@ -98,17 +98,17 @@ pub fn parse_for_query<'a>(
                         let text = &input[text_start..tag_start];
                         if text.iter().any(|&b| !b.is_ascii_whitespace()) {
                             index.text_ranges.push(TextRange {
-                                start: text_start as u32,
-                                end: tag_start as u32,
+                                start: text_start as u64,
+                                end: tag_start as u64,
                                 parent_tag: open_tag_idx,
                             });
                         }
                     }
 
-                    index.tag_starts.push(tag_start as u32);
-                    index.tag_ends.push(pos as u32);
+                    index.tag_starts.push(tag_start as u64);
+                    index.tag_ends.push(pos as u64);
                     index.tag_types.push(TagType::Close);
-                    index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
+                    index.tag_names.push((name_start as u64, (name_end - name_start) as u16));
                     index.depths.push(depth);
                     let parent_idx = find_interesting_parent(&parent_stack);
                     index.parents.push(parent_idx);
@@ -147,8 +147,8 @@ pub fn parse_for_query<'a>(
                                 if pos > content_start && has_interesting_ancestor(&parent_stack) {
                                     let parent = find_interesting_parent(&parent_stack);
                                     index.text_ranges.push(TextRange {
-                                        start: content_start as u32,
-                                        end: pos as u32,
+                                        start: content_start as u64,
+                                        end: pos as u64,
                                         parent_tag: parent,
                                     });
                                 }
@@ -238,10 +238,10 @@ pub fn parse_for_query<'a>(
                     let tag_idx = index.tag_starts.len() as u32;
                     let parent_idx = find_interesting_parent(&parent_stack);
 
-                    index.tag_starts.push(tag_start as u32);
-                    index.tag_ends.push(pos as u32);
+                    index.tag_starts.push(tag_start as u64);
+                    index.tag_ends.push(pos as u64);
                     index.tag_types.push(tag_type);
-                    index.tag_names.push((name_start as u32, (name_end - name_start) as u16));
+                    index.tag_names.push((name_start as u64, (name_end - name_start) as u16));
                     index.depths.push(depth);
                     index.parents.push(parent_idx);
 
@@ -313,8 +313,8 @@ fn capture_text_if_interesting(
         if text.iter().any(|&b| !b.is_ascii_whitespace()) {
             let parent = find_interesting_parent(parent_stack);
             index.text_ranges.push(TextRange {
-                start: text_start as u32,
-                end: current_pos as u32,
+                start: text_start as u64,
+                end: current_pos as u64,
                 parent_tag: parent,
             });
         }
