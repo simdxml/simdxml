@@ -368,25 +368,35 @@ fn merge_chunks<'a>(input: &'a [u8], chunks: Vec<ChunkResult>) -> Result<XmlInde
     }
 
     // === Fused pass: depth, parents, close_map, post_order, text parents ===
-    // All use the same stack walk. Fusing avoids a separate O(n) pass in build_indices.
+    // Pre-allocated arrays with direct indexing (no Vec::push bounds checks).
+    // Text range parents assigned via interleaved linear scan (O(n+t), cache-friendly).
     let n = tag_types.len();
-    let mut depths = Vec::with_capacity(n);
-    let mut parents = Vec::with_capacity(n);
+
+    let mut depths = vec![0u16; n];
+    let mut parents = vec![u32::MAX; n];
     let mut close_map = vec![u32::MAX; n];
     let mut post_order = vec![0u32; n];
     let mut depth: u16 = 0;
-    let mut parent_stack: Vec<u32> = Vec::new();
+    let mut parent_stack: Vec<u32> = Vec::with_capacity(256);
     let mut post_counter: u32 = 0;
     let mut text_idx = 0;
 
     for i in 0..n {
         let tag_pos = tag_starts[i];
 
+        // Interleaved text range parent assignment (O(n+t), sequential access)
         while text_idx < text_ranges.len() && text_ranges[text_idx].start < tag_pos {
-            text_ranges[text_idx].parent_tag = parent_stack.last().copied().unwrap_or(u32::MAX);
+            text_ranges[text_idx].parent_tag = if parent_stack.is_empty() { u32::MAX } else {
+                unsafe { *parent_stack.get_unchecked(parent_stack.len() - 1) }
+            };
             text_idx += 1;
         }
 
+        let parent = if parent_stack.is_empty() { u32::MAX } else {
+            unsafe { *parent_stack.get_unchecked(parent_stack.len() - 1) }
+        };
+
+        // Direct indexing instead of Vec::push — no bounds checks
         match tag_types[i] {
             TagType::Close => {
                 if depth > 0 { depth -= 1; }
@@ -396,33 +406,34 @@ fn merge_chunks<'a>(input: &'a [u8], chunks: Vec<ChunkResult>) -> Result<XmlInde
                 }
                 post_order[i] = post_counter;
                 post_counter += 1;
-                depths.push(depth);
-                parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
+                depths[i] = depth;
+                parents[i] = if parent_stack.is_empty() { u32::MAX } else {
+                    unsafe { *parent_stack.get_unchecked(parent_stack.len() - 1) }
+                };
             }
             TagType::Open => {
-                depths.push(depth);
-                parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
+                depths[i] = depth;
+                parents[i] = parent;
                 parent_stack.push(i as u32);
                 depth += 1;
             }
-            TagType::SelfClose => {
-                close_map[i] = i as u32;
+            _ => {
+                // SelfClose, Comment, CData, PI — all handled the same way
+                if tag_types[i] == TagType::SelfClose {
+                    close_map[i] = i as u32;
+                }
                 post_order[i] = post_counter;
                 post_counter += 1;
-                depths.push(depth);
-                parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
-            }
-            TagType::Comment | TagType::CData | TagType::PI => {
-                post_order[i] = post_counter;
-                post_counter += 1;
-                depths.push(depth);
-                parents.push(parent_stack.last().copied().unwrap_or(u32::MAX));
+                depths[i] = depth;
+                parents[i] = parent;
             }
         }
     }
 
     while text_idx < text_ranges.len() {
-        text_ranges[text_idx].parent_tag = parent_stack.last().copied().unwrap_or(u32::MAX);
+        text_ranges[text_idx].parent_tag = if parent_stack.is_empty() { u32::MAX } else {
+            unsafe { *parent_stack.get_unchecked(parent_stack.len() - 1) }
+        };
         text_idx += 1;
     }
 
