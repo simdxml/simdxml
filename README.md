@@ -24,7 +24,7 @@ Benchmarked on Apple M4 Max (NEON) and AMD Ryzen 9 3950X (AVX2).
 | pugixml | 38.8ms | 2.6x slower |
 | xmllint | 257.7ms | 17.5x slower |
 
-Wins are largest on attribute-dense XML (where SIMD quote masking shines) and multi-gigabyte files (where flat-array memory efficiency dominates). pugixml wins on scalar aggregation queries (`count()`) and text predicates (`contains()`) where its single-pass DOM build has lower overhead. On small files (<1 MB), all native tools are within startup noise. See the [paper](paper/) for detailed per-query analysis with confidence intervals.
+Wins are largest on attribute-dense XML (where SIMD quote masking shines) and multi-gigabyte files (where flat-array memory efficiency dominates). pugixml wins on scalar aggregation queries (`count()`) and text predicates (`contains()`) where its single-pass DOM build has lower overhead. On small files (<1 MB), all native tools are within startup noise.
 
 ## sxq — CLI tool
 
