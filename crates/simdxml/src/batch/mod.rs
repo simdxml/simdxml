@@ -22,7 +22,8 @@ pub fn eval_batch_text(
 
     for &doc in docs {
         let mut index = crate::parse(doc)?;
-        index.build_name_index();
+        // Name index skipped: single-query-per-doc doesn't benefit from posting lists.
+        // The XPath evaluator falls back to linear tag_name_eq scan.
         let texts: Vec<String> = xpath.eval_text(&index)?
             .into_iter().map(|s| s.to_string()).collect();
         all_results.push(texts);
@@ -44,7 +45,8 @@ pub fn eval_batch_text_lazy(
             Some(names) => crate::index::lazy::parse_for_query(doc, names)?,
             None => crate::parse(doc)?,
         };
-        index.build_name_index();
+        // Name index skipped: single-query-per-doc doesn't benefit from posting lists.
+        // The XPath evaluator falls back to linear tag_name_eq scan.
         let texts: Vec<String> = xpath.eval_text(&index)?
             .into_iter().map(|s| s.to_string()).collect();
         all_results.push(texts);
@@ -85,7 +87,8 @@ pub fn eval_batch_text_bloom(
             Some(names) => crate::index::lazy::parse_for_query(doc, names)?,
             None => crate::parse(doc)?,
         };
-        index.build_name_index();
+        // Name index skipped: single-query-per-doc doesn't benefit from posting lists.
+        // The XPath evaluator falls back to linear tag_name_eq scan.
         let texts: Vec<String> = xpath.eval_text(&index)?
             .into_iter().map(|s| s.to_string()).collect();
         all_results.push(texts);
@@ -103,7 +106,8 @@ pub fn count_batch(
 
     for &doc in docs {
         let mut index = crate::parse(doc)?;
-        index.build_name_index();
+        // Name index skipped: single-query-per-doc doesn't benefit from posting lists.
+        // The XPath evaluator falls back to linear tag_name_eq scan.
         let nodes = xpath.eval(&index)?;
         counts.push(nodes.len());
     }
@@ -175,7 +179,8 @@ pub fn eval_batch_parallel(
                     }
                 };
 
-                index.build_name_index();
+                // Name index skipped: single-query-per-doc doesn't benefit from posting lists.
+        // The XPath evaluator falls back to linear tag_name_eq scan.
                 let texts: Vec<String> = xpath.eval_text(&index)?
                     .into_iter().map(|s| s.to_string()).collect();
                 Ok(texts)
