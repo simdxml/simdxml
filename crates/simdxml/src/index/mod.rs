@@ -1,3 +1,21 @@
+//! Flat-array structural index for XML documents.
+//!
+//! Instead of building a DOM tree with heap-allocated nodes and pointer-chasing,
+//! this module represents XML structure as parallel arrays (struct-of-arrays layout).
+//! Each tag gets an entry in `tag_starts`, `tag_ends`, `tag_types`, `tag_names`,
+//! `depths`, and `parents` — all indexed by the same tag position.
+//!
+//! Memory overhead is ~16 bytes per tag vs ~35 bytes per node in a typical DOM.
+//!
+//! Parent-child and sibling relationships are stored in CSR (Compressed Sparse Row)
+//! format, built lazily on first XPath evaluation. Tag names are interned to `u16`
+//! IDs with an inverted posting index for O(1) name-to-tags lookup.
+//!
+//! The index supports all 13 XPath 1.0 axes via array operations:
+//! - O(1) ancestor/descendant checks using pre/post-order numbering
+//! - O(1) child enumeration via CSR offsets
+//! - O(1) tag name matching via interned name IDs
+
 pub(crate) mod lazy;
 pub(crate) mod structural;
 pub(crate) mod tags;
@@ -9,6 +27,21 @@ pub(crate) mod tags;
 /// pointer-chasing through a DOM.
 ///
 /// Memory: ~16 bytes per tag vs ~35 bytes per node in a typical DOM.
+///
+/// # Examples
+///
+/// ```rust
+/// let xml = b"<root><item>hello</item><item>world</item></root>";
+/// let mut index = simdxml::parse(xml).unwrap();
+///
+/// // Lazy index build happens automatically on first query
+/// let texts = index.xpath_text("//item").unwrap();
+/// assert_eq!(texts, vec!["hello", "world"]);
+///
+/// // Or build indices explicitly for repeated queries
+/// index.ensure_indices();
+/// index.build_name_index();
+/// ```
 pub struct XmlIndex<'a> {
     /// Original XML bytes (borrowed, not copied)
     pub(crate) input: &'a [u8],
@@ -67,12 +100,18 @@ pub struct XmlIndex<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TagType {
-    Open = 0,      // <tag>
-    Close = 1,     // </tag>
-    SelfClose = 2, // <tag/>
-    Comment = 3,   // <!-- ... -->
-    CData = 4,     // <![CDATA[ ... ]]>
-    PI = 5,        // <?target ... ?>
+    /// An opening tag: `<tag>` or `<tag attr="val">`
+    Open = 0,
+    /// A closing tag: `</tag>`
+    Close = 1,
+    /// A self-closing tag: `<tag/>` or `<tag attr="val"/>`
+    SelfClose = 2,
+    /// An XML comment: `<!-- ... -->`
+    Comment = 3,
+    /// A CDATA section: `<![CDATA[ ... ]]>`
+    CData = 4,
+    /// A processing instruction: `<?target ... ?>`
+    PI = 5,
 }
 
 impl TagType {
@@ -167,15 +206,21 @@ impl<'a> NameInterner<'a> {
     }
 }
 
-/// A text content node between tags.
+/// A text content range between tags.
+///
+/// Represents a contiguous run of text bytes in the original XML input.
+/// The `parent_tag` is the index of the innermost enclosing open tag.
+/// For text between sibling elements (e.g., `<a>text<b/>more</a>`),
+/// `parent_tag` points to the common parent (`<a>` in this example).
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct TextRange {
-    /// Byte offset of text start
+    /// Byte offset of text start in the original XML input.
     pub start: u64,
-    /// Byte offset of text end (exclusive)
+    /// Byte offset of text end (exclusive) in the original XML input.
     pub end: u64,
-    /// Index of the parent open tag
+    /// Index of the parent open tag in the [`XmlIndex`] arrays.
+    /// Set to `u32::MAX` for text at the document root level.
     pub parent_tag: u32,
 }
 

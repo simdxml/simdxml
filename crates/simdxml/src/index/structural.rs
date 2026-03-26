@@ -1,8 +1,29 @@
+//! Structural XML parsers that produce an [`XmlIndex`].
+//!
+//! Two parser strategies are available, both producing identical output:
+//!
+//! - **[`parse_scalar`]**: memchr-based scanner. Jumps directly between `<` characters
+//!   using SIMD-accelerated `memchr`, skipping text regions entirely. Faster for
+//!   text-heavy or mixed XML where tags are sparse.
+//!
+//! - **[`parse_two_stage`]**: NEON two-stage classifier (adapted from simdjson).
+//!   Stage 1 classifies every byte in the input with SIMD vector operations,
+//!   producing bitmasks of structural characters (`<`, `>`, `/`, `?`, `!`).
+//!   Stage 2 walks the bitmasks to build the index. Faster for attribute-dense XML
+//!   where the scalar parser wastes cycles scanning through quoted attribute values.
+//!
+//! The [`crate::parse`] entry point selects between them using a `quote_ratio`
+//! heuristic: sample the first 4KB, and if the ratio of `"` to `<` exceeds 5.0,
+//! use the two-stage parser (attribute-heavy). Otherwise use the scalar parser.
+//!
+//! Both parsers build the same [`XmlIndex`] with identical arrays and pass all
+//! 327 XPath conformance tests.
+
 use crate::error::{Result, SimdXmlError};
 use crate::index::{TagType, TextRange, XmlIndex};
 use memchr::memchr;
 
-/// Build an XmlIndex from XML bytes.
+/// Build an [`XmlIndex`] from XML bytes using memchr-based scanning.
 /// Uses SIMD-accelerated byte scanning (via memchr) for finding structural
 /// characters, with sequential processing for tag classification and index building.
 /// Phase 2 replaces this with SIMD for the structural character detection.
@@ -265,7 +286,9 @@ pub fn parse_scalar<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
     Ok(index)
 }
 
-/// Two-stage SIMD parser: Stage 1 classifies all bytes with NEON,
+/// Build an [`XmlIndex`] from XML bytes using NEON two-stage classification.
+///
+/// Stage 1 classifies all bytes with SIMD vector operations into bitmasks.
 /// Stage 2 walks the bitmasks to build the structural index.
 pub fn parse_two_stage<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
     let structural = crate::simd::classify_structural(input);

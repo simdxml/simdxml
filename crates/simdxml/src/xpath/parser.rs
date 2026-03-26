@@ -1,3 +1,20 @@
+//! Nom-based XPath 1.0 parser.
+//!
+//! Parses XPath expression strings into the [`XPathExpr`] AST defined in
+//! [`super::ast`]. Covers the full XPath 1.0 grammar including:
+//!
+//! - Absolute and relative location paths (`/a/b`, `a/b`)
+//! - Abbreviated syntax (`//`, `..`, `@`, `.`)
+//! - All 13 axes (`child::`, `descendant-or-self::`, etc.)
+//! - Node tests (`name`, `*`, `text()`, `node()`, `comment()`, `processing-instruction()`)
+//! - Predicates with arbitrary nesting (`[position()=1]`, `[@attr='val']`)
+//! - Operators (`and`, `or`, `=`, `!=`, `<`, `>`, `+`, `-`, `*`, `div`, `mod`)
+//! - Function calls (`contains()`, `starts-with()`, `count()`, `string-length()`, etc.)
+//! - Union expressions (`a | b`)
+//!
+//! Entry points: [`parse_xpath`] for full expressions, [`parse_xpath_predicate_expr`]
+//! for standalone predicate/arithmetic expressions.
+
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},

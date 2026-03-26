@@ -12,3 +12,4 @@ bench/corpora/
 bench/results/
 bench/pugixml-xpath
 *.sxi
+.claude/

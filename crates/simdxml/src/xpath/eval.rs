@@ -1,3 +1,21 @@
+//! XPath 1.0 evaluation engine.
+//!
+//! Evaluates parsed [`XPathExpr`] ASTs against an [`XmlIndex`] using array-based
+//! axis traversal. Instead of walking DOM pointers, each axis operation is a scan
+//! or lookup over the flat index arrays:
+//!
+//! - **child**: CSR offset lookup in `child_offsets`/`child_data`
+//! - **descendant**: range scan from open tag to matching close tag
+//! - **descendant-or-self with child**: fused into a single pass (the most common
+//!   XPath pattern `//name` avoids generating intermediate node sets)
+//! - **parent/ancestor**: direct lookup via `parents` array + pre/post-order check
+//! - **following-sibling/preceding-sibling**: scan siblings in the parent's CSR children
+//!
+//! Predicate evaluation supports positional predicates (`[1]`, `[last()]`),
+//! boolean predicates (`[@attr='val']`), and nested path predicates (`[child/text()]`).
+//! String predicates like `contains()` and `starts-with()` are batched through
+//! [`super::simd_pred`] for SIMD-accelerated evaluation over large candidate sets.
+
 use crate::error::{Result, SimdXmlError};
 use crate::index::{TagType, XmlIndex};
 use super::ast::*;
@@ -60,13 +78,19 @@ fn xpath_format_number(n: f64) -> String {
 }
 
 /// A node in the XPath result set.
+///
+/// Nodes are lightweight references into the [`XmlIndex`] arrays --
+/// they carry only an index (and optionally a hash), not owned data.
 #[derive(Debug, Clone, Copy)]
 pub enum XPathNode {
-    Element(usize),              // index into tag_starts
-    Text(usize),                 // index into text_ranges
-    /// (tag_idx, attr_name_hash) — hash used for fast comparison
+    /// An element node. The `usize` is the index into [`XmlIndex`] tag arrays.
+    Element(usize),
+    /// A text node. The `usize` is the index into [`XmlIndex::text_ranges`](crate::index::XmlIndex).
+    Text(usize),
+    /// An attribute node: `(tag_idx, attr_name_hash)`.
+    /// The hash (FNV-1a) enables fast attribute name comparison without string allocation.
     Attribute(usize, u64),
-    /// (owning_element_idx, prefix_hash) — namespace node
+    /// A namespace node: `(owning_element_idx, prefix_hash)`.
     Namespace(usize, u64),
 }
 

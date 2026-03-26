@@ -1,75 +1,97 @@
 # simdxml
 
-**A SIMD-accelerated XML parser with full XPath 1.0 support.**
+SIMD-accelerated XML parser with full XPath 1.0 support.
 
-Uses a two-pass structural indexing architecture (adapted from [simdjson](https://github.com/simdjson/simdjson)) to parse XML and evaluate XPath expressions against flat arrays instead of a DOM tree.
+Parses XML into flat arrays instead of a DOM tree using structural indexing adapted from [simdjson](https://simdjson.org/). Evaluates XPath expressions against those arrays with cache-friendly access patterns. Includes `sxq`, a fast command-line tool for XML/XPath queries.
 
-## Status
+## Performance
 
-**Phase 1 complete:** Scalar parser + full XPath 1.0 engine with all 13 axes.
-Phase 2 (SIMD structural indexer) in progress.
+| Benchmark | sxq | pugixml (C++) | xmllint (C) | Speedup |
+|-----------|-----|---------------|-------------|---------|
+| DBLP 5.1 GB | 3.2s | 8.3s | - | **2.6x** |
+| PubMed 195 MB | 107ms | 174ms | 831ms | **1.6x** / **7.8x** |
+| Attr-heavy 10 MB | 7.8ms | 13.1ms | 138ms | **1.7x** / **17.7x** |
 
-## Quick Start
+Parse throughput: **2.3 GB/s** (parallel, 8 threads) on real-world medical XML.
 
-### As a library
+## sxq — CLI tool
+
+```sh
+cargo install simdxml-cli
+```
+
+```sh
+sxq '//title' book.xml
+sxq '//claim[@type="independent"]' patents/*.xml
+sxq -c '//record' huge.xml
+sxq -r '//path' drawing.svg
+sxq -j '//author' papers/*.xml
+sxq 'count(//article)' dblp.xml
+cat feed.xml | sxq '//item/title'
+sxq info large.xml
+```
+
+Files are mmap'd. Large files are parsed in parallel. 684 KB binary, zero dependencies.
+
+## Library
+
+```sh
+cargo add simdxml
+```
 
 ```rust
 use simdxml::{parse, CompiledXPath};
 
-let xml = br#"<patent><claim>A device for...</claim></patent>"#;
+let xml = b"<library><book><title>Rust</title></book></library>";
 let index = parse(xml).unwrap();
 
-// One-shot XPath
-let texts = index.xpath_text("//claim").unwrap();
-assert_eq!(texts, vec!["A device for..."]);
+// One-shot query
+let titles = index.xpath_text("//title").unwrap();
+assert_eq!(titles, vec!["Rust"]);
 
-// Compiled XPath (reusable across documents)
-let expr = CompiledXPath::compile("//claim").unwrap();
-let texts = expr.eval_text(&index).unwrap();
+// Compiled query (reusable across documents)
+let query = CompiledXPath::compile("//title").unwrap();
+let titles = query.eval_text(&index).unwrap();
+
+// Scalar expressions
+let mut index = parse(xml).unwrap();
+let count = index.eval("count(//book)").unwrap(); // Number(1)
 ```
 
-### As a CLI
+## XPath 1.0
 
-```bash
-# Extract patent claims
-simdxml query -e '//claim' patent.xml
+Full support for all 13 axes, predicates, functions, operators, and unions. 327/327 libxml2 conformance tests, 1015/1023 pugixml conformance tests.
 
-# Extract title
-simdxml query -e '/patent/title' patent.xml
+All axes: `child`, `descendant`, `descendant-or-self`, `parent`, `ancestor`, `ancestor-or-self`, `following-sibling`, `preceding-sibling`, `following`, `preceding`, `self`, `attribute`, `namespace`
 
-# Show structural index info
-simdxml info patent.xml
-```
-
-### As a DuckDB extension
-
-```sql
-LOAD 'duckdb_xpath';
-
-SELECT * FROM xpath_text('<patent><claim>text</claim></patent>', '//claim');
-```
-
-## XPath 1.0 Support
-
-All 13 axes supported:
-- `child`, `descendant`, `descendant-or-self`
-- `parent`, `ancestor`, `ancestor-or-self`
-- `following-sibling`, `preceding-sibling`
-- `following`, `preceding`
-- `self`, `attribute`, `namespace`
-
-Node tests: `name`, `*`, `text()`, `node()`, `comment()`, `processing-instruction()`
-
-Abbreviated syntax: `/`, `//`, `..`, `.`, `@`
+Functions: `string()`, `count()`, `sum()`, `boolean()`, `not()`, `contains()`, `starts-with()`, `substring()`, `concat()`, `normalize-space()`, `translate()`, `string-length()`, `number()`, `floor()`, `ceiling()`, `round()`, `id()`, `name()`, `local-name()`, `namespace-uri()`, `position()`, `last()`, `true()`, `false()`, `lang()`
 
 ## Architecture
 
-Two-pass structural indexing (no DOM):
+Two-pass structural indexing (no DOM tree):
 
-1. **Stage 1:** Scan XML bytes, detect structural characters, build flat index arrays
-2. **Stage 2:** Evaluate XPath against the index using array operations
+1. **Parse** — Scan XML bytes with SIMD-accelerated character classification, build flat arrays (tag offsets, types, depths, parents, text ranges). ~16 bytes/tag vs ~35 for a DOM node.
+2. **Query** — Evaluate XPath against the arrays using CSR indices, pre/post-order numbering for O(1) ancestor checks, and inverted name posting lists.
 
-The structural index uses ~16 bytes per tag vs ~35 bytes per node in a typical DOM.
+Additional features: parallel parsing across cores, lazy index building, bloom filter prescan for batch skip, persistent `.sxi` index files.
+
+## Platform Support
+
+| Platform | SIMD Backend | Status |
+|----------|-------------|--------|
+| aarch64 (Apple Silicon, ARM) | NEON 128-bit | Production |
+| x86_64 | Scalar (memchr-accelerated) | Working |
+| x86_64 | SSE4.2 / AVX2 | In progress |
+| wasm32 | Scalar | Planned |
+
+## Project Structure
+
+```
+crates/simdxml/      Rust library (crates.io: simdxml)
+crates/simdxml-cli/  CLI tool (crates.io: simdxml-cli, binary: sxq)
+bench/               Benchmark scripts and pugixml comparison shim
+testdata/            Conformance test suites (libxml2, pugixml)
+```
 
 ## License
 
