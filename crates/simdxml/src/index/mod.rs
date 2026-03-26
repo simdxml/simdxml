@@ -16,8 +16,10 @@
 //! - O(1) child enumeration via CSR offsets
 //! - O(1) tag name matching via interned name IDs
 
-pub(crate) mod lazy;
-pub(crate) mod structural;
+#[doc(hidden)]
+pub mod lazy;
+#[doc(hidden)]
+pub mod structural;
 pub(crate) mod tags;
 
 /// The structural index — flat arrays, no DOM tree.

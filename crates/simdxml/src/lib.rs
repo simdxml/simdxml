@@ -153,10 +153,6 @@ pub use xpath::XPathResult;
 ///
 /// Both produce identical structural indices and pass 327/327 XPath conformance.
 pub fn parse(input: &[u8]) -> Result<XmlIndex<'_>> {
-    if std::str::from_utf8(input).is_err() {
-        return Err(SimdXmlError::InvalidXml("input is not valid UTF-8".into()));
-    }
-
     // Heuristic: sample first 4KB to detect attribute-heavy XML.
     // High quote-to-tag ratio means lots of attribute content to scan.
     // NEON two-stage processes quotes vectorially; memchr scans them byte-at-a-time.
@@ -180,10 +176,6 @@ pub fn parse(input: &[u8]) -> Result<XmlIndex<'_>> {
 /// For selective queries like `//claim/text()`, this can be 2-5x faster than
 /// full parsing because it skips index construction for irrelevant tags.
 pub fn parse_for_xpath<'a>(input: &'a [u8], xpath_str: &str) -> Result<XmlIndex<'a>> {
-    if std::str::from_utf8(input).is_err() {
-        return Err(SimdXmlError::InvalidXml("input is not valid UTF-8".into()));
-    }
-
     let compiled = CompiledXPath::compile(xpath_str)?;
     match compiled.interesting_names() {
         Some(names) => index::lazy::parse_for_query(input, &names),
