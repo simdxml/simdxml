@@ -34,6 +34,10 @@ struct TestBlock {
     xml: Option<String>,
     #[serde(default)]
     source_file: Option<String>,
+    /// XPath to find the context node for "first_child" context (e.g., "/n/n2").
+    /// If absent, uses the root element.
+    #[serde(default)]
+    context_xpath: Option<String>,
     assertions: Vec<Assertion>,
 }
 
@@ -59,6 +63,19 @@ fn run_pugixml_tests() -> (usize, usize, Vec<String>) {
                     || index.tag_types[i] == simdxml::index::TagType::SelfClose))
             .unwrap_or(0);
 
+        // Determine first_child context: use context_xpath if specified, else root element
+        let first_child_idx = if let Some(ctx_xpath) = &block.context_xpath {
+            index.xpath(ctx_xpath)
+                .ok()
+                .and_then(|nodes| nodes.first().and_then(|n| match n {
+                    simdxml::xpath::XPathNode::Element(idx) => Some(*idx),
+                    _ => None,
+                }))
+                .unwrap_or(root_elem_idx)
+        } else {
+            root_elem_idx
+        };
+
         for assertion in &block.assertions {
             let ctx = assertion.context.as_deref().unwrap_or("doc");
             // Skip contexts we can't handle
@@ -70,11 +87,11 @@ fn run_pugixml_tests() -> (usize, usize, Vec<String>) {
 
                     total += 1;
                     let xpath_str = assertion.xpath.clone();
-                    let root_elem = root_elem_idx;
+                    let fc_idx = first_child_idx;
 
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if ctx == "first_child" {
-                            index.xpath_from(&xpath_str, root_elem)
+                            index.xpath_from(&xpath_str, fc_idx)
                         } else {
                             // pugixml "doc" context = virtual document root,
                             // not the document element. Use evaluate() directly.
@@ -113,7 +130,7 @@ fn run_pugixml_tests() -> (usize, usize, Vec<String>) {
                         if ctx == "null" {
                             eval_standalone_expr(&xpath_clone)
                         } else {
-                            if ctx == "first_child" { index.eval_expr_from(&xpath_clone, root_elem_idx) } else { index.eval_expr(&xpath_clone) }
+                            if ctx == "first_child" { index.eval_expr_from(&xpath_clone, first_child_idx) } else { index.eval_expr(&xpath_clone) }
                         }
                     }));
                     let expr_result = match expr_result {
@@ -149,7 +166,7 @@ fn run_pugixml_tests() -> (usize, usize, Vec<String>) {
                         if ctx == "null" {
                             eval_standalone_expr(&xpath_clone)
                         } else {
-                            if ctx == "first_child" { index.eval_expr_from(&xpath_clone, root_elem_idx) } else { index.eval_expr(&xpath_clone) }
+                            if ctx == "first_child" { index.eval_expr_from(&xpath_clone, first_child_idx) } else { index.eval_expr(&xpath_clone) }
                         }
                     }));
                     let expr_result = match expr_result {
@@ -165,7 +182,51 @@ fn run_pugixml_tests() -> (usize, usize, Vec<String>) {
                                 passed += 1;
                             }
                         }
-                        Ok(_) => failures.push(format!("[{}] TYPE: {} expected boolean", block.name, assertion.xpath)),
+                        Ok(StandaloneResult::String(s)) => {
+                            // LocationPath expressions return strings via eval_expr.
+                            // For boolean tests, try evaluating as a nodeset for truthiness.
+                            if ctx != "null" {
+                                let xpath_retry = assertion.xpath.clone();
+                                let fc = first_child_idx;
+                                let nodeset_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    if ctx == "first_child" {
+                                        index.xpath_from(&xpath_retry, fc)
+                                    } else {
+                                        let expr = simdxml::xpath::parse_xpath(&xpath_retry)?;
+                                        simdxml::xpath::evaluate(&index, &expr)
+                                    }
+                                }));
+                                let b = match nodeset_result {
+                                    Ok(Ok(nodes)) => !nodes.is_empty(),
+                                    _ => !s.is_empty(), // fallback to string truthiness
+                                };
+                                if let Some(serde_json::Value::Bool(exp)) = &assertion.expected {
+                                    if b == *exp { passed += 1; }
+                                    else { failures.push(format!("[{}] BOOL: {} expected {} got {}", block.name, assertion.xpath, exp, b)); }
+                                } else {
+                                    passed += 1;
+                                }
+                            } else {
+                                // For null context, use string truthiness
+                                let b = !s.is_empty();
+                                if let Some(serde_json::Value::Bool(exp)) = &assertion.expected {
+                                    if b == *exp { passed += 1; }
+                                    else { failures.push(format!("[{}] BOOL: {} expected {} got {}", block.name, assertion.xpath, exp, b)); }
+                                } else {
+                                    passed += 1;
+                                }
+                            }
+                        }
+                        Ok(StandaloneResult::Number(n)) => {
+                            // Number to boolean: true if nonzero and not NaN
+                            let b = n != 0.0 && !n.is_nan();
+                            if let Some(serde_json::Value::Bool(exp)) = &assertion.expected {
+                                if b == *exp { passed += 1; }
+                                else { failures.push(format!("[{}] BOOL: {} expected {} got {}", block.name, assertion.xpath, exp, b)); }
+                            } else {
+                                passed += 1;
+                            }
+                        }
                         Err(e) => failures.push(format!("[{}] ERROR: {} -> {}", block.name, assertion.xpath, e)),
                     }
                 }
@@ -178,7 +239,7 @@ fn run_pugixml_tests() -> (usize, usize, Vec<String>) {
                         if ctx == "null" {
                             eval_standalone_expr(&xpath_clone)
                         } else {
-                            if ctx == "first_child" { index.eval_expr_from(&xpath_clone, root_elem_idx) } else { index.eval_expr(&xpath_clone) }
+                            if ctx == "first_child" { index.eval_expr_from(&xpath_clone, first_child_idx) } else { index.eval_expr(&xpath_clone) }
                         }
                     }));
                     let expr_result = match expr_result {

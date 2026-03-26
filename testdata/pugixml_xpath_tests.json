@@ -623,7 +623,8 @@
             6
           ]
         }
-      ]
+      ],
+      "context_xpath": "/node/chapter[3]"
     },
     {
       "name": "xpath_paths_w3c_22",
@@ -646,7 +647,8 @@
             4
           ]
         }
-      ]
+      ],
+      "context_xpath": "/node/chapter[3]"
     },
     {
       "name": "xpath_paths_w3c_23",
@@ -7898,7 +7900,8 @@
             3
           ]
         }
-      ]
+      ],
+      "context_xpath": "/node/chapter[3]"
     },
     {
       "name": "xpath_paths_predicate_number",
@@ -7941,7 +7944,8 @@
             3
           ]
         }
-      ]
+      ],
+      "context_xpath": "/node/chapter[3]"
     },
     {
       "name": "xpath_paths_predicate_number_boundary",
@@ -8231,7 +8235,8 @@
             4
           ]
         }
-      ]
+      ],
+      "context_xpath": "/node/chapter[3]"
     },
     {
       "name": "xpath_paths_predicate_filter_number",
@@ -8274,7 +8279,8 @@
             4
           ]
         }
-      ]
+      ],
+      "context_xpath": "/node/chapter[3]"
     },
     {
       "name": "xpath_paths_predicate_filter_posinv",
@@ -9191,7 +9197,8 @@
             4
           ]
         }
-      ]
+      ],
+      "context_xpath": "/n/n2"
     },
     {
       "name": "xpath_paths_step_leaf_predicate_coverage",
@@ -9313,7 +9320,8 @@
             4
           ]
         }
-      ]
+      ],
+      "context_xpath": "/n/n2"
     },
     {
       "name": "xpath_paths_step_step_coverage",
@@ -9439,7 +9447,8 @@
             4
           ]
         }
-      ]
+      ],
+      "context_xpath": "/n/n2"
     },
     {
       "name": "xpath_paths_step_step_predicate_coverage",
@@ -9561,7 +9570,8 @@
             4
           ]
         }
-      ]
+      ],
+      "context_xpath": "/n/n2"
     }
   ]
 }

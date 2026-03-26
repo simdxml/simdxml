@@ -91,7 +91,7 @@ fn collect_from_steps(steps: &[Step], names: &mut HashSet<String>, needs_all: &m
             }
             // text(), comment(), processing-instruction() don't filter by tag name
             // but they don't force NeedsAll either — they match non-element nodes
-            NodeTest::Text | NodeTest::Comment | NodeTest::PI => {}
+            NodeTest::Text | NodeTest::Comment | NodeTest::PI | NodeTest::PIName(_) => {}
         }
 
         // Predicates may reference additional tag names

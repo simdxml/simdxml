@@ -59,21 +59,38 @@ fn function_path_expr(input: &str) -> IResult<&str, XPathExpr> {
     }
 }
 
-/// Parenthesized filter: (expr)[pred] — evaluate expr, then filter with pred
+/// Parenthesized filter: (expr)[pred] or (expr)/path — evaluate expr, then filter or continue path
 fn parenthesized_filter(input: &str) -> IResult<&str, XPathExpr> {
     let (input, _) = char('(')(input)?;
     let (input, _) = multispace0(input)?;
     let (input, inner) = xpath_expr(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = char(')')(input)?;
-    let (input, preds) = predicates(input)?;
 
-    if preds.is_empty() {
-        // Just parenthesized, no filter
-        Ok((input, inner))
+    // Check for path continuation: (.)/foo or (.)//foo
+    if input.starts_with('/') {
+        let (input, steps) = parse_continuation_steps(input)?;
+        if steps.is_empty() {
+            Ok((input, inner))
+        } else {
+            // Check for predicates after the path steps
+            let (input, preds) = predicates(input)?;
+            let expr = XPathExpr::FilterPath(Box::new(inner), steps);
+            if preds.is_empty() {
+                Ok((input, expr))
+            } else {
+                Ok((input, XPathExpr::GlobalFilter(Box::new(expr), preds)))
+            }
+        }
     } else {
-        // GlobalFilter: evaluate inner, then apply predicates to the whole result set
-        Ok((input, XPathExpr::GlobalFilter(Box::new(inner), preds)))
+        let (input, preds) = predicates(input)?;
+        if preds.is_empty() {
+            // Just parenthesized, no filter
+            Ok((input, inner))
+        } else {
+            // GlobalFilter: evaluate inner, then apply predicates to the whole result set
+            Ok((input, XPathExpr::GlobalFilter(Box::new(inner), preds)))
+        }
     }
 }
 
@@ -330,20 +347,56 @@ fn node_test(input: &str) -> IResult<&str, NodeTest> {
 
 fn node_type_test(input: &str) -> IResult<&str, NodeTest> {
     let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '-')(input)?;
-    let (input, _) = tag("()")(input)?;
-    let test = match name {
-        "text" => NodeTest::Text,
-        "node" => NodeTest::Node,
-        "comment" => NodeTest::Comment,
-        "processing-instruction" => NodeTest::PI,
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+
+    match name {
+        "text" => {
+            let (input, _) = char(')')(input)?;
+            Ok((input, NodeTest::Text))
+        }
+        "node" => {
+            let (input, _) = char(')')(input)?;
+            Ok((input, NodeTest::Node))
+        }
+        "comment" => {
+            let (input, _) = char(')')(input)?;
+            Ok((input, NodeTest::Comment))
+        }
+        "processing-instruction" => {
+            // processing-instruction() or processing-instruction('name')
+            if input.starts_with(')') {
+                let (input, _) = char(')')(input)?;
+                Ok((input, NodeTest::PI))
+            } else {
+                // Parse string argument: 'name' or "name"
+                let (input, pi_name) = alt((
+                    |i| {
+                        let (i, _) = char('\'')(i)?;
+                        let (i, s) = nom::bytes::complete::take_while(|c| c != '\'')(i)?;
+                        let (i, _) = char('\'')(i)?;
+                        Ok((i, s))
+                    },
+                    |i| {
+                        let (i, _) = char('"')(i)?;
+                        let (i, s) = nom::bytes::complete::take_while(|c| c != '"')(i)?;
+                        let (i, _) = char('"')(i)?;
+                        Ok((i, s))
+                    },
+                ))(input)?;
+                let (input, _) = multispace0(input)?;
+                let (input, _) = char(')')(input)?;
+                Ok((input, NodeTest::PIName(pi_name.to_string())))
+            }
+        }
         _ => {
-            return Err(nom::Err::Error(nom::error::Error::new(
+            Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Tag,
-            )));
+            )))
         }
-    };
-    Ok((input, test))
+    }
 }
 
 fn wildcard_test(input: &str) -> IResult<&str, NodeTest> {
@@ -359,7 +412,7 @@ fn wildcard_test(input: &str) -> IResult<&str, NodeTest> {
 }
 
 fn name_test(input: &str) -> IResult<&str, NodeTest> {
-    let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '-' || c == '_' || c == ':')(input)?;
+    let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')(input)?;
     if let Some(colon_pos) = name.find(':') {
         let prefix = &name[..colon_pos];
         let local = &name[colon_pos + 1..];
@@ -477,14 +530,24 @@ fn multiplicative_expr(input: &str) -> IResult<&str, XPathExpr> {
     let (mut input, mut left) = unary_expr(input)?;
     loop {
         let (rest, _) = multispace0(input)?;
-        if let Ok((rest, op)) = alt::<_, _, nom::error::Error<&str>, _>((
-            nom::combinator::map(char('*'), |_| BinaryOp::Mul),
-            nom::combinator::map(tag("div"), |_| BinaryOp::Div),
-            nom::combinator::map(tag("mod"), |_| BinaryOp::Mod),
-        ))(rest) {
+        // * is always an operator here (not wildcard — we're past the path level)
+        if let Ok((rest, _)) = char::<_, nom::error::Error<&str>>('*')(rest) {
             let (rest, _) = multispace0(rest)?;
             let (rest, right) = unary_expr(rest)?;
-            left = XPathExpr::BinaryOp(Box::new(left), op, Box::new(right));
+            left = XPathExpr::BinaryOp(Box::new(left), BinaryOp::Mul, Box::new(right));
+            input = rest;
+        } else if rest.starts_with("div") && rest[3..].starts_with(|c: char| !c.is_alphanumeric() && c != '-' && c != '_') {
+            // div must be followed by non-name char (word boundary) — reject "div2" etc.
+            let rest = &rest[3..];
+            let (rest, _) = multispace0(rest)?;
+            let (rest, right) = unary_expr(rest)?;
+            left = XPathExpr::BinaryOp(Box::new(left), BinaryOp::Div, Box::new(right));
+            input = rest;
+        } else if rest.starts_with("mod") && rest[3..].starts_with(|c: char| !c.is_alphanumeric() && c != '-' && c != '_') {
+            let rest = &rest[3..];
+            let (rest, _) = multispace0(rest)?;
+            let (rest, right) = unary_expr(rest)?;
+            left = XPathExpr::BinaryOp(Box::new(left), BinaryOp::Mod, Box::new(right));
             input = rest;
         } else {
             return Ok((input, left));
@@ -499,7 +562,40 @@ fn unary_expr(input: &str) -> IResult<&str, XPathExpr> {
         let (input, expr) = unary_expr(input)?;
         Ok((input, XPathExpr::UnaryMinus(Box::new(expr))))
     } else {
-        primary_expr_inner(input)
+        union_path_expr(input)
+    }
+}
+
+/// Union path expression: path | path | ...
+/// XPath 1.0: UnionExpr ::= PathExpr | UnionExpr '|' PathExpr
+/// Only path expressions (not numbers/strings) can be union operands.
+fn union_path_expr(input: &str) -> IResult<&str, XPathExpr> {
+    let (input, first) = primary_expr_inner(input)?;
+
+    // Only try union if we got a path-like expression (not a literal)
+    let is_path = matches!(&first,
+        XPathExpr::LocationPath(_)
+        | XPathExpr::FunctionCall(_, _)
+        | XPathExpr::FilterPath(_, _)
+        | XPathExpr::GlobalFilter(_, _)
+        | XPathExpr::Union(_)
+    );
+
+    if !is_path {
+        return Ok((input, first));
+    }
+
+    let (input, rest) = nom::multi::many0(preceded(
+        delimited(multispace0, char('|'), multispace0),
+        primary_expr_inner,
+    ))(input)?;
+
+    if rest.is_empty() {
+        Ok((input, first))
+    } else {
+        let mut all = vec![first];
+        all.extend(rest);
+        Ok((input, XPathExpr::Union(all)))
     }
 }
 
@@ -517,13 +613,29 @@ fn primary_expr_inner(input: &str) -> IResult<&str, XPathExpr> {
 fn parenthesized_pred_expr(input: &str) -> IResult<&str, XPathExpr> {
     let (input, _) = char('(')(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, expr) = predicate_expr(input)?;
+    // Support full expressions including union (|) inside parens
+    let (input, first) = predicate_expr(input)?;
+    let (input, rest) = nom::multi::many0(preceded(
+        delimited(multispace0, char('|'), multispace0),
+        predicate_expr,
+    ))(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, expr))
+    if rest.is_empty() {
+        Ok((input, first))
+    } else {
+        let mut all = vec![first];
+        all.extend(rest);
+        Ok((input, XPathExpr::Union(all)))
+    }
 }
 
 fn function_call_expr(input: &str) -> IResult<&str, XPathExpr> {
+    // Function names must start with a letter (not digit or hyphen)
+    let first = input.chars().next().ok_or_else(|| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Alpha)))?;
+    if !first.is_alphabetic() {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Alpha)));
+    }
     let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '-')(input)?;
     // Reject node type tests (text, node, comment, processing-instruction)
     if matches!(name, "text" | "node" | "comment" | "processing-instruction") {

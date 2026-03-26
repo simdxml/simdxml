@@ -72,8 +72,10 @@ pub enum NodeTest {
     Node,
     /// Match comment nodes: comment()
     Comment,
-    /// Match processing instructions: processing-instruction()
+    /// Match processing instructions: processing-instruction() or processing-instruction('name')
     PI,
+    /// Match processing instruction with specific target name
+    PIName(String),
     /// Namespace-prefixed name: prefix:name
     NamespacedName(String, String),
 }

@@ -320,7 +320,12 @@ fn eval_fused_descendant_child(
             XPathNode::Element(DOC_ROOT) => (0, index.tag_count()),
             XPathNode::Element(idx) if idx < index.tag_count() => {
                 let close = index.matching_close(idx).unwrap_or(index.tag_count());
-                (idx, close)
+                // Start from idx+1 to skip the context element itself.
+                // descendant-or-self::node()/child::name finds elements named `name`
+                // that are children of some descendant-or-self node. The context node's
+                // children are found (since self is in desc-or-self), but the context
+                // itself is NOT a child of any node in the set.
+                (idx + 1, close)
             }
             _ => continue,
         };
@@ -598,7 +603,27 @@ fn apply_predicate<'a>(
         }
 
         // Comparison: [@attr='value'], [position()=N], etc.
+        // Arithmetic: [3 div 3] evaluates to a number → position predicate
         XPathExpr::BinaryOp(left, op, right) => {
+            let is_arithmetic = matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod);
+            if is_arithmetic {
+                // Arithmetic expression as predicate: evaluate to number, compare against position()
+                let mut result = Vec::new();
+                for (i, &node) in nodes.iter().enumerate() {
+                    let val = eval_predicate_value(index, node, pred, i + 1, nodes.len())?;
+                    match val {
+                        XPathValue::Number(n) => {
+                            let pos = (i + 1) as f64;
+                            if pos == n { result.push(node); }
+                        }
+                        _ => {
+                            if val.is_truthy() { result.push(node); }
+                        }
+                    }
+                }
+                return Ok(result);
+            }
+
             let mut result = Vec::new();
             for (i, &node) in nodes.iter().enumerate() {
                 // For or/and with LocationPath operands, evaluate as node-set existence
@@ -772,12 +797,25 @@ fn eval_predicate_value(
                     }))
                 } else if left_is_path {
                     let r = eval_predicate_value(index, node, right, position, size)?;
-                    left_nodes.iter().any(|n| {
-                        let lv = XPathValue::String(node_string_value(index, *n));
+                    // XPath 1.0 §3.4: For = and !=, if other is boolean, convert
+                    // node-set to boolean. For < > <= >=, convert to number.
+                    let is_eq = matches!(op, BinaryOp::Eq | BinaryOp::Neq);
+                    if is_eq && matches!(&r, XPathValue::Boolean(_)) {
+                        let lv = XPathValue::Boolean(!left_nodes.is_empty());
                         compare_values(&lv, op, &r)
-                    })
+                    } else {
+                        left_nodes.iter().any(|n| {
+                            let lv = XPathValue::String(node_string_value(index, *n));
+                            compare_values(&lv, op, &r)
+                        })
+                    }
                 } else {
                     let l = eval_predicate_value(index, node, left, position, size)?;
+                    let is_eq = matches!(op, BinaryOp::Eq | BinaryOp::Neq);
+                    if is_eq && matches!(&l, XPathValue::Boolean(_)) {
+                        let rv = XPathValue::Boolean(!right_nodes.is_empty());
+                        return Ok(XPathValue::Boolean(compare_values(&l, op, &rv)));
+                    }
                     right_nodes.iter().any(|n| {
                         let rv = XPathValue::String(node_string_value(index, *n));
                         compare_values(&l, op, &rv)
@@ -801,6 +839,15 @@ fn eval_predicate_value(
                 }
             };
             Ok(XPathValue::Number(result))
+        }
+        XPathExpr::Union(_) | XPathExpr::FilterPath(_, _) | XPathExpr::GlobalFilter(_, _) => {
+            // Evaluate as nodeset, return string value of first node
+            let nodes = evaluate_in_context(index, node, expr)?;
+            if let Some(n) = nodes.first() {
+                Ok(XPathValue::String(node_string_value(index, *n)))
+            } else {
+                Ok(XPathValue::String(String::new()))
+            }
         }
         _ => Ok(XPathValue::String(String::new())),
     }
@@ -878,9 +925,61 @@ fn eval_function(
         }
         "true" => Ok(XPathValue::Boolean(true)),
         "false" => Ok(XPathValue::Boolean(false)),
-        "name" | "local-name" => {
-            match node {
-                XPathNode::Element(idx) if idx != DOC_ROOT => {
+        "name" => {
+            // name() returns the QName (prefix:local) of the first node in document order,
+            // or of the context node if no arg.
+            let target = if let Some(arg) = args.first() {
+                let mut nodes = evaluate_in_context(index, node, arg)?;
+                sort_doc_order(index, &mut nodes);
+                nodes.first().copied()
+            } else {
+                Some(node)
+            };
+            match target {
+                Some(XPathNode::Element(idx)) if idx != DOC_ROOT && idx < index.tag_count() => {
+                    Ok(XPathValue::String(index.tag_name(idx).to_string()))
+                }
+                Some(XPathNode::Attribute(tag_idx, name_hash)) => {
+                    // Find the attribute name
+                    let attr_name = index.get_all_attribute_names(tag_idx)
+                        .into_iter()
+                        .find(|n| attr_name_hash(n) == name_hash)
+                        .unwrap_or("");
+                    Ok(XPathValue::String(attr_name.to_string()))
+                }
+                Some(XPathNode::Element(idx)) if idx < index.tag_count()
+                    && index.tag_types[idx] == TagType::PI => {
+                    // PI target name
+                    Ok(XPathValue::String(index.tag_name(idx).to_string()))
+                }
+                _ => Ok(XPathValue::String(String::new())),
+            }
+        }
+        "local-name" => {
+            // local-name() returns the local part (after colon) of the QName.
+            let target = if let Some(arg) = args.first() {
+                let mut nodes = evaluate_in_context(index, node, arg)?;
+                sort_doc_order(index, &mut nodes);
+                nodes.first().copied()
+            } else {
+                Some(node)
+            };
+            match target {
+                Some(XPathNode::Element(idx)) if idx != DOC_ROOT && idx < index.tag_count() => {
+                    let full_name = index.tag_name(idx);
+                    let local = full_name.rsplit_once(':').map_or(full_name, |(_, l)| l);
+                    Ok(XPathValue::String(local.to_string()))
+                }
+                Some(XPathNode::Attribute(tag_idx, name_hash)) => {
+                    let attr_name = index.get_all_attribute_names(tag_idx)
+                        .into_iter()
+                        .find(|n| attr_name_hash(n) == name_hash)
+                        .unwrap_or("");
+                    let local = attr_name.rsplit_once(':').map_or(attr_name, |(_, l)| l);
+                    Ok(XPathValue::String(local.to_string()))
+                }
+                Some(XPathNode::Element(idx)) if idx < index.tag_count()
+                    && index.tag_types[idx] == TagType::PI => {
                     Ok(XPathValue::String(index.tag_name(idx).to_string()))
                 }
                 _ => Ok(XPathValue::String(String::new())),
@@ -1085,7 +1184,56 @@ fn eval_function(
                 Ok(XPathValue::Boolean(false))
             }
         }
+        "namespace-uri" => {
+            let target = if let Some(arg) = args.first() {
+                let mut nodes = evaluate_in_context(index, node, arg)?;
+                sort_doc_order(index, &mut nodes);
+                nodes.first().copied()
+            } else {
+                Some(node)
+            };
+            match target {
+                Some(XPathNode::Element(idx)) if idx != DOC_ROOT && idx < index.tag_count() => {
+                    let full_name = index.tag_name(idx);
+                    let prefix = full_name.split_once(':').map(|(p, _)| p);
+                    Ok(XPathValue::String(resolve_namespace_uri(index, idx, prefix).unwrap_or_default()))
+                }
+                Some(XPathNode::Attribute(tag_idx, name_hash)) => {
+                    let attr_name = index.get_all_attribute_names(tag_idx)
+                        .into_iter()
+                        .find(|n| attr_name_hash(n) == name_hash)
+                        .unwrap_or("");
+                    if let Some((prefix, _)) = attr_name.split_once(':') {
+                        Ok(XPathValue::String(resolve_namespace_uri(index, tag_idx, Some(prefix)).unwrap_or_default()))
+                    } else {
+                        // Unprefixed attributes have no namespace
+                        Ok(XPathValue::String(String::new()))
+                    }
+                }
+                _ => Ok(XPathValue::String(String::new())),
+            }
+        }
         _ => Ok(XPathValue::String(String::new())),
+    }
+}
+
+/// Resolve a namespace URI by walking ancestors looking for xmlns declarations.
+/// `prefix` is None for default namespace (xmlns="..."), Some("foo") for xmlns:foo="...".
+fn resolve_namespace_uri(index: &XmlIndex, start_idx: usize, prefix: Option<&str>) -> Option<String> {
+    let attr_name = match prefix {
+        Some(p) => format!("xmlns:{}", p),
+        None => "xmlns".to_string(),
+    };
+    let mut idx = start_idx;
+    loop {
+        if let Some(uri) = index.get_attribute(idx, &attr_name) {
+            return Some(uri.to_string());
+        }
+        let parent = index.parents[idx];
+        if parent == u32::MAX {
+            return None;
+        }
+        idx = parent as usize;
     }
 }
 
@@ -1124,6 +1272,47 @@ fn compare_values(left: &XPathValue, op: &BinaryOp, right: &XPathValue) -> bool 
 
 fn node_string_value(index: &XmlIndex, node: XPathNode) -> String {
     match node {
+        XPathNode::Element(idx) if idx == DOC_ROOT => {
+            // Document root string value = concatenation of all text in the document
+            let mut result = String::new();
+            for range in &index.text_ranges {
+                result.push_str(&XmlIndex::decode_entities(index.text_content(range)));
+            }
+            result
+        }
+        XPathNode::Element(idx) if idx < index.tag_count() && index.tag_types[idx] == TagType::PI => {
+            // PI string value = content after target name, before ?>
+            let start = index.tag_starts[idx] as usize;
+            let end = index.tag_ends[idx] as usize;
+            // tag_ends may or may not include the final >, handle both
+            let bytes = &index.input[start..end];
+            let s = unsafe { std::str::from_utf8_unchecked(bytes) };
+            // Strip <? prefix and ?> suffix (tag_end may point at '>' so try both)
+            let inner = s.strip_prefix("<?").unwrap_or(s);
+            let inner = inner.strip_suffix("?>")
+                .or_else(|| inner.strip_suffix("?"))
+                .or_else(|| inner.strip_suffix(">"))
+                .unwrap_or(inner);
+            // Skip target name (first word)
+            if let Some(space_pos) = inner.find(|c: char| c.is_whitespace()) {
+                inner[space_pos..].trim().to_string()
+            } else {
+                String::new() // PI with no value
+            }
+        }
+        XPathNode::Element(idx) if idx < index.tag_count() && index.tag_types[idx] == TagType::Comment => {
+            // Comment string value = content between <!-- and -->
+            let start = index.tag_starts[idx] as usize;
+            let end = index.tag_ends[idx] as usize;
+            let bytes = &index.input[start..end];
+            let s = unsafe { std::str::from_utf8_unchecked(bytes) };
+            let inner = s.strip_prefix("<!--").unwrap_or(s);
+            inner.strip_suffix("-->")
+                .or_else(|| inner.strip_suffix("--"))
+                .or_else(|| inner.strip_suffix(">"))
+                .unwrap_or(inner)
+                .to_string()
+        }
         XPathNode::Element(idx) if idx != DOC_ROOT => {
             XmlIndex::decode_entities(&index.all_text(idx)).into_owned()
         }
@@ -1188,6 +1377,21 @@ pub fn evaluate_from_context(
             sort_doc_order(index, &mut result);
             Ok(result)
         }
+        XPathExpr::GlobalFilter(inner, preds) => {
+            let mut nodes = evaluate_from_context(index, inner, context_node)?;
+            for pred in preds {
+                nodes = apply_predicate(index, &nodes, pred)?;
+            }
+            Ok(nodes)
+        }
+        XPathExpr::FilterPath(primary, steps) => {
+            let mut context = evaluate_from_context(index, primary, context_node)?;
+            for step in steps {
+                context = eval_step(index, &context, step)?;
+            }
+            Ok(context)
+        }
+        XPathExpr::FunctionCall(_, _) => evaluate(index, expr),
         _ => evaluate(index, expr),
     }
 }
@@ -1210,6 +1414,33 @@ fn evaluate_in_context(
             // Absolute path: evaluate from document root
             evaluate(index, expr)
         }
+        XPathExpr::Union(exprs) => {
+            let mut result = Vec::new();
+            for e in exprs {
+                result.extend(evaluate_in_context(index, context_node, e)?);
+            }
+            dedup_nodes(&mut result);
+            sort_doc_order(index, &mut result);
+            Ok(result)
+        }
+        XPathExpr::FilterPath(primary, steps) => {
+            let mut context = evaluate_in_context(index, context_node, primary)?;
+            for step in steps {
+                context = eval_step(index, &context, step)?;
+            }
+            Ok(context)
+        }
+        XPathExpr::GlobalFilter(inner, preds) => {
+            let mut nodes = evaluate_in_context(index, context_node, inner)?;
+            for pred in preds {
+                nodes = apply_predicate(index, &nodes, pred)?;
+            }
+            Ok(nodes)
+        }
+        XPathExpr::FunctionCall(name, args) if name == "id" => {
+            // id() function returns a nodeset
+            evaluate(index, expr)
+        }
         _ => Ok(vec![]),
     }
 }
@@ -1224,7 +1455,9 @@ fn matches_node_test(index: &XmlIndex, node: XPathNode, test: &NodeTest) -> bool
                 && (index.tag_types[idx] == TagType::Open || index.tag_types[idx] == TagType::SelfClose)
         }
         (XPathNode::Namespace(_, _), NodeTest::Wildcard) => true,
-        (XPathNode::Attribute(_, _), NodeTest::Wildcard) => true,
+        // Note: Attribute wildcard matching is handled by eval_attribute_axis directly.
+        // For non-attribute axes (self, ancestor, descendant, etc.), wildcard does NOT
+        // match attribute nodes because the principal node type is element.
         (XPathNode::Text(_), NodeTest::Text) => true,
         (XPathNode::Element(idx), NodeTest::Name(name)) if idx < index.tag_count() => {
             // Name test matches only elements (Open/SelfClose), not PI/Comment/CData
@@ -1237,7 +1470,26 @@ fn matches_node_test(index: &XmlIndex, node: XPathNode, test: &NodeTest) -> bool
         (XPathNode::Element(idx), NodeTest::PI) if idx < index.tag_count() => {
             index.tag_types[idx] == TagType::PI
         }
-        // Attribute name test: only matches in attribute axis context.
+        (XPathNode::Element(idx), NodeTest::PIName(target)) if idx < index.tag_count() => {
+            index.tag_types[idx] == TagType::PI && index.tag_name_eq(idx, target)
+        }
+        // Namespace-prefixed name: prefix:local or prefix:* matches elements with that QName
+        (XPathNode::Element(idx), NodeTest::NamespacedName(prefix, local)) if idx < index.tag_count() => {
+            let tt = index.tag_types[idx];
+            if tt != TagType::Open && tt != TagType::SelfClose { return false; }
+            let full_name = index.tag_name(idx);
+            if local == "*" {
+                // prefix:* matches all elements with that prefix
+                full_name.starts_with(prefix.as_str()) && full_name.as_bytes().get(prefix.len()) == Some(&b':')
+            } else if let Some((p, l)) = full_name.split_once(':') {
+                p == prefix && l == local
+            } else {
+                false
+            }
+        }
+        // Attribute name/NamespacedName tests: only match in attribute axis context.
+        // This is handled by eval_attribute_axis. In non-attribute axes,
+        // attributes don't match name tests (principal node type is element).
         // This is handled by eval_attribute_axis — if we get here from
         // another axis (self, ancestor-or-self), attributes don't match
         // element name tests.
@@ -1554,6 +1806,7 @@ fn eval_preceding_sibling_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNo
 }
 
 fn eval_following_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
+    let is_attr = matches!(node, XPathNode::Attribute(_, _) | XPathNode::Namespace(_, _));
     let idx = match node {
         XPathNode::Element(i) => i,
         XPathNode::Namespace(i, _) | XPathNode::Attribute(i, _) => i,
@@ -1566,9 +1819,27 @@ fn eval_following_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
     let close = index.matching_close(idx).unwrap_or(idx);
     let mut result = Vec::new();
 
-    for i in (close.saturating_add(1))..index.tag_count() {
-        if index.tag_types[i] == TagType::Open || index.tag_types[i] == TagType::SelfClose {
-            result.push(XPathNode::Element(i));
+    if is_attr {
+        // For attribute/namespace nodes, following includes the owning element's
+        // children and descendants (attributes precede children in document order),
+        // plus everything after the owning element's subtree.
+        for i in (idx + 1)..index.tag_count() {
+            if is_node_tag(index.tag_types[i]) && index.tag_types[i] != TagType::Close {
+                result.push(XPathNode::Element(i));
+            }
+        }
+        // Also include text nodes
+        for (ti, range) in index.text_ranges.iter().enumerate() {
+            if range.start > index.tag_starts[idx] {
+                result.push(XPathNode::Text(ti));
+            }
+        }
+        sort_doc_order(index, &mut result);
+    } else {
+        for i in (close.saturating_add(1))..index.tag_count() {
+            if index.tag_types[i] == TagType::Open || index.tag_types[i] == TagType::SelfClose {
+                result.push(XPathNode::Element(i));
+            }
         }
     }
 
@@ -1628,15 +1899,41 @@ fn eval_attribute_axis(
 
     match test {
         NodeTest::Name(name) => {
+            // xmlns is not a regular attribute
+            if name == "xmlns" || name.starts_with("xmlns:") {
+                return vec![];
+            }
             if index.get_attribute(idx, name).is_some() {
                 vec![XPathNode::Attribute(idx, attr_name_hash(name))]
             } else {
                 vec![]
             }
         }
+        NodeTest::NamespacedName(prefix, local) => {
+            // xmlns:* declarations are namespace nodes, not attributes
+            if prefix == "xmlns" {
+                return vec![];
+            }
+            if local == "*" {
+                // prefix:* matches all attributes with that prefix
+                let prefix_colon = format!("{}:", prefix);
+                index.get_all_attribute_names(idx).iter()
+                    .filter(|name| name.starts_with(&prefix_colon))
+                    .map(|name| XPathNode::Attribute(idx, attr_name_hash(name)))
+                    .collect()
+            } else {
+                let full_name = format!("{}:{}", prefix, local);
+                if index.get_attribute(idx, &full_name).is_some() {
+                    vec![XPathNode::Attribute(idx, attr_name_hash(&full_name))]
+                } else {
+                    vec![]
+                }
+            }
+        }
         NodeTest::Wildcard | NodeTest::Node => {
-            // Return all attributes
-            index.get_all_attribute_names(idx).iter()
+            // Return all attributes, excluding xmlns declarations (namespace nodes)
+            index.get_all_attribute_names(idx).into_iter()
+                .filter(|name| *name != "xmlns" && !name.starts_with("xmlns:"))
                 .map(|name| XPathNode::Attribute(idx, attr_name_hash(name)))
                 .collect()
         }
@@ -1674,10 +1971,8 @@ fn eval_namespace_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
         current = if parent != u32::MAX { Some(parent as usize) } else { None };
     }
 
-    // Always include the built-in `xml` namespace
-    if seen_prefixes.insert("xml".to_string()) {
-        ns_map.push(("xml".to_string(), attr_name_hash("xml")));
-    }
+    // Note: NOT including the built-in `xml` namespace by default.
+    // Pugixml only returns explicit namespace declarations.
 
     // Return namespace nodes (owned by this element)
     ns_map.into_iter()
