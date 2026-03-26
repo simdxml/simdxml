@@ -123,8 +123,8 @@ fn run_query(
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
 
-    // Parallel batch path for multi-file
-    if multi && threads > 1 && !raw && !files_with_matches {
+    // Batch path for multi-file (compiled XPath reused across all files)
+    if multi && !raw && !files_with_matches {
         return run_batch(&compiled, &sources, show_filename, sep, &mut out, threads,
                          count, json, whitespace);
     }
@@ -158,6 +158,7 @@ fn run_query(
                 }
 
                 if raw {
+                    index.ensure_indices(); // close_map needed for raw_xml
                     // Extract raw XML directly from already-evaluated nodes
                     let fragments: Vec<&str> = nodes.iter().map(|node| match *node {
                         simdxml::xpath::XPathNode::Element(idx) => index.raw_xml(idx),
@@ -175,7 +176,8 @@ fn run_query(
                     continue;
                 }
 
-                // Extract text directly from already-evaluated nodes
+                // Build CSR indices for fast text child lookup
+                index.ensure_indices();
                 let texts = simdxml::xpath::extract_text(&index, nodes)?;
                 let texts: Vec<&str> = if whitespace { texts }
                     else { texts.into_iter().filter(|s| !s.trim().is_empty()).collect() };
