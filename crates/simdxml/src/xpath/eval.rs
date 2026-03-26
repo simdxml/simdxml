@@ -546,6 +546,11 @@ fn eval_fused_descendant_child_with_preds(
 ) -> Result<Vec<XPathNode>> {
     let mut result = Vec::new();
 
+    // Detect simple @attr='literal' predicate for inline evaluation.
+    // Instead of collecting all candidates then filtering, check the
+    // attribute during the scan — avoids materializing non-matching nodes.
+    let inline_attr_pred = extract_simple_attr_eq(&child_step.predicates);
+
     for &ctx_node in context {
         let (scan_start, scan_end) = match ctx_node {
             XPathNode::Element(DOC_ROOT) => (0, index.tag_count()),
@@ -556,17 +561,32 @@ fn eval_fused_descendant_child_with_preds(
             _ => continue,
         };
 
-        // Collect all matching elements in one scan
+        // Collect all matching elements — use posting list when available
         let mut all_matches: Vec<XPathNode> = Vec::new();
         match &child_step.node_test {
             NodeTest::Name(name) => {
-                for j in scan_start..scan_end {
-                    let tt = index.tag_types[j];
-                    if (tt == TagType::Open || tt == TagType::SelfClose)
-                        && index.tag_name_eq(j, name)
-                    {
-                        all_matches.push(XPathNode::Element(j));
+                let posting = index.tags_by_name(name);
+                let iter: Box<dyn Iterator<Item = usize>> = if !posting.is_empty() && scan_start == 0 && scan_end == index.tag_count() {
+                    Box::new(posting.iter().map(|&j| j as usize))
+                } else if !posting.is_empty() {
+                    let lo = posting.partition_point(|&j| (j as usize) < scan_start);
+                    let hi = posting.partition_point(|&j| (j as usize) < scan_end);
+                    Box::new(posting[lo..hi].iter().map(|&j| j as usize))
+                } else {
+                    Box::new((scan_start..scan_end).filter(|&j| {
+                        let tt = index.tag_types[j];
+                        (tt == TagType::Open || tt == TagType::SelfClose)
+                            && index.tag_name_eq(j, name)
+                    }))
+                };
+                for j in iter {
+                    // Fused attribute predicate: check inline during scan
+                    if let Some((attr, val, _pred_idx)) = &inline_attr_pred {
+                        if index.get_attribute(j, attr) != Some(val) {
+                            continue;
+                        }
                     }
+                    all_matches.push(XPathNode::Element(j));
                 }
             }
             NodeTest::NamespacedName(prefix, local) => {
@@ -615,7 +635,11 @@ fn eval_fused_descendant_child_with_preds(
             parent_groups.entry(parent).or_default().push(m);
         }
         for (_parent, mut group) in parent_groups {
-            for pred in &child_step.predicates {
+            for (pi, pred) in child_step.predicates.iter().enumerate() {
+                // Skip the predicate that was already applied inline during scan
+                if inline_attr_pred.as_ref().is_some_and(|(_, _, idx)| *idx == pi) {
+                    continue;
+                }
                 group = apply_predicate(index, &group, pred)?;
             }
             result.extend(group);
@@ -2137,6 +2161,44 @@ fn eval_namespace_axis(index: &XmlIndex, node: XPathNode) -> Vec<XPathNode> {
     ns_map.into_iter()
         .map(|(_, hash)| XPathNode::Namespace(idx, hash))
         .collect()
+}
+
+/// Extract a simple `@attr='literal'` predicate for inline evaluation during scan.
+/// Returns (attr_name, value, predicate_index) if found.
+fn extract_simple_attr_eq(predicates: &[XPathExpr]) -> Option<(String, String, usize)> {
+    for (i, pred) in predicates.iter().enumerate() {
+        if let XPathExpr::BinaryOp(left, BinaryOp::Eq, right) = pred {
+            // Check: left is @attr, right is 'literal'
+            if let XPathExpr::LocationPath(path) = left.as_ref() {
+                if !path.absolute
+                    && path.steps.len() == 1
+                    && path.steps[0].axis == Axis::Attribute
+                    && path.steps[0].predicates.is_empty()
+                {
+                    if let NodeTest::Name(attr_name) = &path.steps[0].node_test {
+                        if let XPathExpr::StringLiteral(val) = right.as_ref() {
+                            return Some((attr_name.clone(), val.clone(), i));
+                        }
+                    }
+                }
+            }
+            // Also check reversed: 'literal' = @attr
+            if let XPathExpr::LocationPath(path) = right.as_ref() {
+                if !path.absolute
+                    && path.steps.len() == 1
+                    && path.steps[0].axis == Axis::Attribute
+                    && path.steps[0].predicates.is_empty()
+                {
+                    if let NodeTest::Name(attr_name) = &path.steps[0].node_test {
+                        if let XPathExpr::StringLiteral(val) = left.as_ref() {
+                            return Some((attr_name.clone(), val.clone(), i));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Fast attribute predicate: `[@attr='value']` via memmem scan of raw bytes.
