@@ -580,8 +580,15 @@ impl<'a> XmlIndex<'a> {
         };
 
         let mut result = String::new();
-        for range in &self.text_ranges {
-            if range.start >= tag_start && range.end <= tag_end {
+
+        // Binary search for the first text range at or after tag_start.
+        // Text ranges are ordered by start offset, so we can skip ahead.
+        let start_idx = self.text_ranges
+            .partition_point(|r| r.start < tag_start);
+
+        for range in &self.text_ranges[start_idx..] {
+            if range.start > tag_end { break; }
+            if range.end <= tag_end {
                 result.push_str(self.text_content(range));
             }
         }
