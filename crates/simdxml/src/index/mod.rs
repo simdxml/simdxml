@@ -49,10 +49,10 @@ pub struct XmlIndex<'a> {
     pub(crate) input: &'a [u8],
 
     /// Byte offset of each '<' (start of each tag/comment/PI)
-    pub(crate) tag_starts: Vec<u64>,
+    pub tag_starts: Vec<u64>,
 
     /// Byte offset of each '>' (end of each tag/comment/PI)
-    pub(crate) tag_ends: Vec<u64>,
+    pub tag_ends: Vec<u64>,
 
     /// Tag type classification
     pub(crate) tag_types: Vec<TagType>,
@@ -64,10 +64,10 @@ pub struct XmlIndex<'a> {
     pub(crate) depths: Vec<u16>,
 
     /// Index of parent tag (into tag_starts array). Root tags have parent = u32::MAX.
-    pub(crate) parents: Vec<u32>,
+    pub parents: Vec<u32>,
 
     /// Text content ranges: (start_offset, end_offset) for text between tags
-    pub(crate) text_ranges: Vec<TextRange>,
+    pub text_ranges: Vec<TextRange>,
 
     // === Precomputed indices (built by `build_indices()`) ===
 
@@ -92,11 +92,11 @@ pub struct XmlIndex<'a> {
     // === Tag name interning ===
 
     /// Interned name ID per tag. Same name → same ID. u16::MAX = no name.
-    pub(crate) name_ids: Vec<u16>,
+    pub name_ids: Vec<u16>,
     /// Unique name strings: name_id → (byte_offset, length) in input.
-    pub(crate) name_table: Vec<(u64, u16)>,
+    pub name_table: Vec<(u64, u16)>,
     /// Inverted index: name_id → sorted list of tag indices (Open/SelfClose only).
-    pub(crate) name_posting: Vec<Vec<u32>>,
+    pub name_posting: Vec<Vec<u32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,7 +306,7 @@ impl<'a> XmlIndex<'a> {
 
     /// Get child text range indices for a parent (from precomputed CSR index).
     #[inline]
-    pub(crate) fn child_text_slice(&self, parent_idx: usize) -> &[u32] {
+    pub fn child_text_slice(&self, parent_idx: usize) -> &[u32] {
         if self.text_child_offsets.len() < 2 || parent_idx + 1 >= self.text_child_offsets.len() {
             return &[];
         }
@@ -595,6 +595,123 @@ impl<'a> XmlIndex<'a> {
             }
         }
         result
+    }
+
+    // === Element navigation and zero-allocation child access ===
+
+    /// Get the parent tag index of an element.
+    /// Returns `None` for root-level elements or out-of-range indices.
+    pub fn parent(&self, tag_idx: usize) -> Option<usize> {
+        if tag_idx >= self.parents.len() {
+            return None;
+        }
+        let p = self.parents[tag_idx];
+        if p == u32::MAX { None } else { Some(p as usize) }
+    }
+
+    /// Get the position of a tag within its parent's children list.
+    /// Returns `None` for root-level elements.
+    pub fn child_position(&self, tag_idx: usize) -> Option<usize> {
+        let parent = self.parent(tag_idx)?;
+        if self.has_indices() {
+            let slice = self.child_tag_slice(parent);
+            slice.iter().position(|&c| c as usize == tag_idx)
+        } else {
+            let children = self.children(parent);
+            children.iter().position(|&c| c == tag_idx)
+        }
+    }
+
+    /// Direct child tag indices as a borrowed slice (zero allocation).
+    ///
+    /// Requires `ensure_indices()` to have been called. Returns an empty
+    /// slice if indices haven't been built.
+    pub fn child_slice(&self, parent_idx: usize) -> &[u32] {
+        self.child_tag_slice(parent_idx)
+    }
+
+    /// Number of direct child elements.
+    ///
+    /// Zero allocation when indices are built; falls back to `children()`
+    /// (which allocates) if not.
+    pub fn child_count(&self, parent_idx: usize) -> usize {
+        if self.has_indices() {
+            self.child_tag_slice(parent_idx).len()
+        } else {
+            self.children(parent_idx).len()
+        }
+    }
+
+    /// Get the i-th child element by position.
+    ///
+    /// Zero allocation when indices are built; falls back to `children()`
+    /// (which allocates) if not.
+    pub fn child_at(&self, parent_idx: usize, pos: usize) -> Option<usize> {
+        if self.has_indices() {
+            let slice = self.child_tag_slice(parent_idx);
+            slice.get(pos).map(|&c| c as usize)
+        } else {
+            let children = self.children(parent_idx);
+            children.get(pos).copied()
+        }
+    }
+
+    /// Get the first direct text child of an element without allocating.
+    /// Returns the text before the first child element (ElementTree `.text` semantics).
+    pub fn direct_text_first(&self, tag_idx: usize) -> Option<&'a str> {
+        if self.has_indices() {
+            let text_children = self.child_text_slice(tag_idx);
+            if let Some(&first_idx) = text_children.first() {
+                let range = &self.text_ranges[first_idx as usize];
+                let text = self.text_content(range);
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+            None
+        } else {
+            // Fallback: linear scan
+            for range in &self.text_ranges {
+                if range.parent_tag == tag_idx as u32 {
+                    let text = self.text_content(range);
+                    if !text.is_empty() {
+                        return Some(text);
+                    }
+                }
+            }
+            None
+        }
+    }
+
+    /// Get the tail text of an element — text after its closing tag, before the
+    /// next sibling opens. This is the ElementTree `.tail` concept.
+    ///
+    /// Returns `None` for root elements or elements with no tail text.
+    pub fn tail_text(&self, tag_idx: usize) -> Option<&'a str> {
+        let parent = self.parent(tag_idx)?;
+
+        // Find the end of this element (close tag or self-close)
+        let close_idx = self.matching_close(tag_idx).unwrap_or(tag_idx);
+        let close_end = self.tag_ends[close_idx] + 1;
+
+        // Binary search for text range starting at close_end.
+        // text_ranges is sorted by start offset.
+        let start_idx = self
+            .text_ranges
+            .partition_point(|r| r.start < close_end);
+
+        for range in &self.text_ranges[start_idx..] {
+            if range.start > close_end {
+                break; // Past the target offset
+            }
+            if range.start == close_end && range.parent_tag == parent as u32 {
+                let text = self.text_content(range);
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+        None
     }
 }
 
