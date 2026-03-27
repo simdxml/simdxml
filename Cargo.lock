@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "simdxml"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "criterion",
  "memchr",
@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "simdxml-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "memmap2",
  "simdxml",

@@ -15,5 +15,5 @@ name = "sxq"
 path = "src/main.rs"
 
 [dependencies]
-simdxml = { version = "0.2.0", path = "../simdxml" }
+simdxml = { version = "0.2.1", path = "../simdxml" }
 memmap2 = "0.9"

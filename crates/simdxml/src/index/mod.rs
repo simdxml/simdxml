@@ -364,7 +364,7 @@ impl<'a> XmlIndex<'a> {
 
     /// Look up the interned name ID for a name string. Returns None if not found.
     #[inline]
-    pub(crate) fn name_id(&self, name: &str) -> Option<u16> {
+    pub fn name_id(&self, name: &str) -> Option<u16> {
         let name_bytes = name.as_bytes();
         for (id, &(off, len)) in self.name_table.iter().enumerate() {
             if len as usize == name_bytes.len()
@@ -378,7 +378,7 @@ impl<'a> XmlIndex<'a> {
 
     /// Get the posting list (sorted tag indices) for a name. O(1) lookup.
     #[inline]
-    pub(crate) fn tags_by_name(&self, name: &str) -> &[u32] {
+    pub fn tags_by_name(&self, name: &str) -> &[u32] {
         if let Some(id) = self.name_id(name) {
             if (id as usize) < self.name_posting.len() {
                 return &self.name_posting[id as usize];
@@ -712,6 +712,109 @@ impl<'a> XmlIndex<'a> {
             }
         }
         None
+    }
+
+    /// Collect all text within an element in stdlib itertext() order.
+    ///
+    /// Returns text segments in document order: .text, then for each child
+    /// recursively their itertext, then the child's .tail. This is a single
+    /// Rust call replacing per-element Python callbacks.
+    pub fn itertext_collect(&self, tag_idx: usize) -> Vec<&'a str> {
+        let start_offset = self.tag_starts[tag_idx];
+        let close_idx = self.matching_close(tag_idx).unwrap_or(tag_idx);
+        let end_offset = self.tag_ends[close_idx] + 1;
+
+        let first = self.text_ranges.partition_point(|r| r.start < start_offset);
+
+        let mut result = Vec::new();
+        for range in &self.text_ranges[first..] {
+            if range.start >= end_offset {
+                break;
+            }
+            let text = self.text_content(range);
+            if !text.is_empty() {
+                result.push(text);
+            }
+        }
+        result
+    }
+
+    /// Serialize an element to C14N canonical XML.
+    ///
+    /// Attributes sorted lexicographically, empty elements expanded to
+    /// start/end pairs. Single Rust call, no per-element FFI.
+    pub fn canonicalize(&self, tag_idx: usize) -> String {
+        let mut out = String::new();
+        self.c14n_element(tag_idx, &mut out);
+        out
+    }
+
+    fn c14n_element(&self, tag_idx: usize, out: &mut String) {
+        let tag = self.tag_name(tag_idx);
+        out.push('<');
+        out.push_str(tag);
+
+        // Sorted attributes
+        let mut attrs = self.get_all_attribute_names(tag_idx)
+            .into_iter()
+            .filter_map(|name| {
+                self.get_attribute(tag_idx, name).map(|val| (name, val))
+            })
+            .collect::<Vec<_>>();
+        attrs.sort_by_key(|&(name, _)| name);
+        for (name, val) in &attrs {
+            out.push(' ');
+            out.push_str(name);
+            out.push_str("=\"");
+            c14n_escape_attr(val, out);
+            out.push('"');
+        }
+        out.push('>');
+
+        // Text content
+        if let Some(text) = self.direct_text_first(tag_idx) {
+            c14n_escape_text(text, out);
+        }
+
+        // Children
+        for &child in self.child_slice(tag_idx) {
+            let child = child as usize;
+            self.c14n_element(child, out);
+            if let Some(tail) = self.tail_text(child) {
+                c14n_escape_text(tail, out);
+            }
+        }
+
+        // Closing tag (C14N never uses self-closing)
+        out.push_str("</");
+        out.push_str(tag);
+        out.push('>');
+    }
+}
+
+fn c14n_escape_text(text: &str, out: &mut String) {
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\r' => out.push_str("&#xD;"),
+            _ => out.push(c),
+        }
+    }
+}
+
+fn c14n_escape_attr(text: &str, out: &mut String) {
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '"' => out.push_str("&quot;"),
+            '\t' => out.push_str("&#x9;"),
+            '\n' => out.push_str("&#xA;"),
+            '\r' => out.push_str("&#xD;"),
+            _ => out.push(c),
+        }
     }
 }
 
