@@ -17,6 +17,14 @@ pub fn classify_scalar(input: &[u8]) -> StructuralIndex {
     for (i, &byte) in input.iter().enumerate() {
         let chunk = i / 64;
         let bit = i % 64;
+        // `<` always begins markup (it is illegal raw in text or attribute
+        // values), so emit it unconditionally and reset quote state. This keeps
+        // a stray `"`/`'` in text content from masking out later tags.
+        if byte == b'<' {
+            lt_bits[chunk] |= 1u64 << bit;
+            in_quote = 0;
+            continue;
+        }
         if in_quote != 0 {
             if byte == in_quote {
                 in_quote = 0;
@@ -24,7 +32,6 @@ pub fn classify_scalar(input: &[u8]) -> StructuralIndex {
             continue;
         }
         match byte {
-            b'<' => lt_bits[chunk] |= 1u64 << bit,
             b'>' => gt_bits[chunk] |= 1u64 << bit,
             b'"' | b'\'' => in_quote = byte,
             _ => {}

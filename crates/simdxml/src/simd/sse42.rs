@@ -22,8 +22,8 @@ pub unsafe fn classify_sse42(input: &[u8]) -> StructuralIndex {
     let mut lt_bits = vec![0u64; num_chunks];
     let mut gt_bits = vec![0u64; num_chunks];
 
-    let mut in_dquote = false;
-    let mut in_squote = false;
+    // Active quote byte carried across chunks: 0, b'"', or b'\''.
+    let mut quote: u8 = 0;
 
     let full_chunks = len / 64;
 
@@ -70,10 +70,8 @@ pub unsafe fn classify_sse42(input: &[u8]) -> StructuralIndex {
         let dq_mask = movemask_64(dq0, dq1, dq2, dq3);
         let sq_mask = movemask_64(sq0, sq1, sq2, sq3);
 
-        let (masked_lt, masked_gt) = apply_quote_mask(
-            lt_mask, gt_mask, dq_mask, sq_mask,
-            &mut in_dquote, &mut in_squote,
-        );
+        let (masked_lt, masked_gt) =
+            super::resolve_quotes(lt_mask, gt_mask, dq_mask, sq_mask, &mut quote);
 
         lt_bits[chunk] = masked_lt;
         gt_bits[chunk] = masked_gt;
@@ -90,19 +88,19 @@ pub unsafe fn classify_sse42(input: &[u8]) -> StructuralIndex {
             let byte = input[i];
             let bit = (i - remaining_start) as u32;
 
-            if in_dquote {
-                if byte == b'"' { in_dquote = false; }
+            if byte == b'<' {
+                lt |= 1u64 << bit;
+                quote = 0;
                 continue;
             }
-            if in_squote {
-                if byte == b'\'' { in_squote = false; }
+            if quote != 0 {
+                if byte == quote { quote = 0; }
                 continue;
             }
             match byte {
-                b'<' => lt |= 1u64 << bit,
                 b'>' => gt |= 1u64 << bit,
-                b'"' => in_dquote = true,
-                b'\'' => in_squote = true,
+                b'"' => quote = b'"',
+                b'\'' => quote = b'\'',
                 _ => {}
             }
         }
@@ -126,118 +124,6 @@ unsafe fn movemask_64(v0: __m128i, v1: __m128i, v2: __m128i, v3: __m128i) -> u64
     let m2 = _mm_movemask_epi8(v2) as u16 as u64;
     let m3 = _mm_movemask_epi8(v3) as u16 as u64;
     m0 | (m1 << 16) | (m2 << 32) | (m3 << 48)
-}
-
-/// Compute prefix-XOR: bit i of result = XOR of bits 0..=i in mask.
-/// Uses scalar shift-and-XOR chain (6 ops on a u64).
-#[inline(always)]
-fn prefix_xor(mask: u64) -> u64 {
-    let mut x = mask;
-    x ^= x << 1;
-    x ^= x << 2;
-    x ^= x << 4;
-    x ^= x << 8;
-    x ^= x << 16;
-    x ^= x << 32;
-    x
-}
-
-#[inline(always)]
-fn mask_up_to(pos: u32) -> u64 {
-    if pos >= 63 { u64::MAX } else { (1u64 << (pos + 1)) - 1 }
-}
-
-#[inline(always)]
-fn mask_from(pos: u32) -> u64 {
-    if pos >= 64 { 0 } else { !((1u64 << pos) - 1) }
-}
-
-#[inline]
-fn apply_quote_mask(
-    lt_mask: u64,
-    gt_mask: u64,
-    dq_mask: u64,
-    sq_mask: u64,
-    in_dquote: &mut bool,
-    in_squote: &mut bool,
-) -> (u64, u64) {
-    if dq_mask == 0 && sq_mask == 0 && !*in_dquote && !*in_squote {
-        return (lt_mask, gt_mask);
-    }
-
-    if sq_mask == 0 && !*in_squote {
-        let quoted = prefix_xor(dq_mask);
-        let quoted = if *in_dquote { !quoted } else { quoted };
-        *in_dquote = (dq_mask.count_ones() & 1 == 1) ^ *in_dquote;
-        return (lt_mask & !quoted, gt_mask & !quoted);
-    }
-
-    if dq_mask == 0 && !*in_dquote {
-        let quoted = prefix_xor(sq_mask);
-        let quoted = if *in_squote { !quoted } else { quoted };
-        *in_squote = (sq_mask.count_ones() & 1 == 1) ^ *in_squote;
-        return (lt_mask & !quoted, gt_mask & !quoted);
-    }
-
-    apply_quote_mask_slow(lt_mask, gt_mask, dq_mask, sq_mask, in_dquote, in_squote)
-}
-
-fn apply_quote_mask_slow(
-    lt_mask: u64,
-    gt_mask: u64,
-    dq_mask: u64,
-    sq_mask: u64,
-    in_dquote: &mut bool,
-    in_squote: &mut bool,
-) -> (u64, u64) {
-    let mut quoted_mask: u64 = 0;
-    let mut remaining = dq_mask | sq_mask;
-
-    if *in_dquote {
-        if dq_mask != 0 {
-            let close_pos = dq_mask.trailing_zeros();
-            quoted_mask |= mask_up_to(close_pos);
-            *in_dquote = false;
-            remaining &= !mask_up_to(close_pos);
-        } else {
-            return (0, 0);
-        }
-    } else if *in_squote {
-        if sq_mask != 0 {
-            let close_pos = sq_mask.trailing_zeros();
-            quoted_mask |= mask_up_to(close_pos);
-            *in_squote = false;
-            remaining &= !mask_up_to(close_pos);
-        } else {
-            return (0, 0);
-        }
-    }
-
-    while remaining != 0 {
-        let pos = remaining.trailing_zeros();
-        remaining &= remaining - 1;
-        let byte_is_dquote = (dq_mask >> pos) & 1 == 1;
-
-        let after_mask = if pos < 63 { !((1u64 << (pos + 1)) - 1) } else { 0 };
-        let close_mask = if byte_is_dquote {
-            dq_mask & after_mask
-        } else {
-            sq_mask & after_mask
-        };
-
-        if close_mask != 0 {
-            let close_pos = close_mask.trailing_zeros();
-            let range = mask_up_to(close_pos) & mask_from(pos);
-            quoted_mask |= range;
-            remaining &= !range;
-        } else {
-            quoted_mask |= mask_from(pos);
-            if byte_is_dquote { *in_dquote = true; } else { *in_squote = true; }
-            break;
-        }
-    }
-
-    (lt_mask & !quoted_mask, gt_mask & !quoted_mask)
 }
 
 #[cfg(test)]

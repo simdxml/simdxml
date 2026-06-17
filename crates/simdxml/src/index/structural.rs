@@ -325,6 +325,15 @@ pub fn parse_two_stage<'a>(input: &'a [u8]) -> Result<XmlIndex<'a>> {
 
     // Stage 2: walk '<' positions from Stage 1
     for lt_pos in structural.lt_positions() {
+        // Skip '<' that fall inside a region we already consumed wholesale —
+        // i.e. the body of a comment, CDATA section, PI, or DOCTYPE. Stage 1
+        // emits every '<' (it cannot know these constructs span multiple
+        // characters), so without this guard a `<` inside `<!-- <x> -->` would
+        // be mis-parsed as a real tag. `last_tag_end` is the last byte consumed.
+        if lt_pos < last_tag_end {
+            continue;
+        }
+
         // Text content between previous tag end and this '<'
         let text_start = if last_tag_end > 0 { last_tag_end + 1 } else { 0 };
         if text_start < lt_pos {
@@ -614,5 +623,93 @@ mod tests {
         let close = index.matching_close(0).unwrap();
         assert_eq!(index.tag_name(close), "root");
         assert_eq!(index.tag_types[close], TagType::Close);
+    }
+
+    /// The two parsers must produce identical structure. `parse_two_stage`
+    /// consumes the SIMD classifier's bitmasks, so this is the differential
+    /// guard against quote/comment handling diverging between the two paths.
+    fn assert_parsers_agree(xml: &[u8]) {
+        let a = parse_scalar(xml).unwrap();
+        let b = parse_two_stage(xml).unwrap();
+        assert_eq!(
+            a.tag_count(),
+            b.tag_count(),
+            "tag_count differs for {:?}",
+            std::str::from_utf8(xml).unwrap_or("<binary>")
+        );
+        for i in 0..a.tag_count() {
+            assert_eq!(a.tag_types[i], b.tag_types[i], "tag_types[{i}] differ");
+            assert_eq!(a.tag_name(i), b.tag_name(i), "tag_name({i}) differ");
+            assert_eq!(a.tag_starts[i], b.tag_starts[i], "tag_starts[{i}] differ");
+        }
+    }
+
+    #[test]
+    fn two_stage_quote_in_text_does_not_drop_tags() {
+        // A literal double quote in text content must not start a "quoted"
+        // region that masks out the following tags. Regression for the
+        // global-quote-state bug in the SIMD classifier.
+        let xml = br#"<r><a>he said "hi</a><b>x</b></r>"#;
+        let idx = parse_two_stage(xml).unwrap();
+        // <r><a></a><b></b></r> = 6 tags. The buggy classifier dropped
+        // everything after the quote, yielding far fewer.
+        assert_eq!(idx.tag_count(), 6);
+        assert_eq!(idx.tag_name(3), "b");
+        assert_eq!(idx.tag_types[3], TagType::Open);
+        assert_parsers_agree(xml);
+    }
+
+    #[test]
+    fn two_stage_apostrophe_in_text_does_not_drop_tags() {
+        let xml = br#"<doc><p>don't stop</p><p>more</p></doc>"#;
+        let idx = parse_two_stage(xml).unwrap();
+        assert_eq!(idx.tag_count(), 6);
+        assert_parsers_agree(xml);
+    }
+
+    #[test]
+    fn two_stage_lt_inside_comment_not_a_tag() {
+        // '<' inside a comment body must not be parsed as a real tag.
+        let xml = br#"<r><!-- <foo> bar --><real/></r>"#;
+        let idx = parse_two_stage(xml).unwrap();
+        // <r> open, comment, <real/> self-close, </r> close = 4 entries.
+        assert_eq!(idx.tag_count(), 4);
+        assert_eq!(idx.tag_types[1], TagType::Comment);
+        assert_eq!(idx.tag_name(2), "real");
+        assert_eq!(idx.tag_types[2], TagType::SelfClose);
+        assert_parsers_agree(xml);
+    }
+
+    #[test]
+    fn two_stage_lt_inside_cdata_not_a_tag() {
+        let xml = br#"<r><![CDATA[ a <b> c ]]><x/></r>"#;
+        let idx = parse_two_stage(xml).unwrap();
+        assert_eq!(idx.tag_types[1], TagType::CData);
+        assert_eq!(idx.tag_name(2), "x");
+        assert_parsers_agree(xml);
+    }
+
+    #[test]
+    fn two_stage_gt_inside_attribute_value() {
+        // '>' inside an attribute value must not end the tag early.
+        let xml = br#"<root attr="a>b">text</root>"#;
+        let idx = parse_two_stage(xml).unwrap();
+        assert_eq!(idx.tag_count(), 2);
+        assert_eq!(idx.tag_name(0), "root");
+        assert_parsers_agree(xml);
+    }
+
+    #[test]
+    fn two_stage_agrees_on_mixed_quotes_and_long_text() {
+        // Exercise >64-byte chunks with quotes straddling chunk boundaries.
+        let mut xml = Vec::from(&b"<root>"[..]);
+        for i in 0..50 {
+            xml.extend_from_slice(
+                format!(r#"<item id="{i}" note='it''s {i}'>text "with" quotes &amp; '{i}'</item>"#)
+                    .as_bytes(),
+            );
+        }
+        xml.extend_from_slice(b"</root>");
+        assert_parsers_agree(&xml);
     }
 }

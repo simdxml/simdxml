@@ -21,10 +21,8 @@ pub fn classify_neon(input: &[u8]) -> StructuralIndex {
     let mut lt_bits = vec![0u64; num_chunks];
     let mut gt_bits = vec![0u64; num_chunks];
 
-    // Track quote state across chunks.
-    // 0 = not in quotes, 1 = in double quotes, 2 = in single quotes
-    let mut in_dquote = false;
-    let mut in_squote = false;
+    // Active quote byte carried across chunks: 0, b'"', or b'\''.
+    let mut quote: u8 = 0;
 
     let full_chunks = len / 64;
 
@@ -72,12 +70,9 @@ pub fn classify_neon(input: &[u8]) -> StructuralIndex {
             let dq_mask = neon_to_bitmask_64(dq0, dq1, dq2, dq3);
             let sq_mask = neon_to_bitmask_64(sq0, sq1, sq2, sq3);
 
-            // Apply quote masking: walk quote characters to determine which
-            // structural characters are inside quoted regions.
-            let (masked_lt, masked_gt) = apply_quote_mask(
-                lt_mask, gt_mask, dq_mask, sq_mask,
-                &mut in_dquote, &mut in_squote,
-            );
+            // Resolve `<`/`>` honoring XML quoting (see simd::resolve_quotes).
+            let (masked_lt, masked_gt) =
+                super::resolve_quotes(lt_mask, gt_mask, dq_mask, sq_mask, &mut quote);
 
             lt_bits[chunk] = masked_lt;
             gt_bits[chunk] = masked_gt;
@@ -95,19 +90,19 @@ pub fn classify_neon(input: &[u8]) -> StructuralIndex {
             let byte = input[i];
             let bit = (i - remaining_start) as u32;
 
-            if in_dquote {
-                if byte == b'"' { in_dquote = false; }
+            if byte == b'<' {
+                lt |= 1u64 << bit;
+                quote = 0;
                 continue;
             }
-            if in_squote {
-                if byte == b'\'' { in_squote = false; }
+            if quote != 0 {
+                if byte == quote { quote = 0; }
                 continue;
             }
             match byte {
-                b'<' => lt |= 1u64 << bit,
                 b'>' => gt |= 1u64 << bit,
-                b'"' => in_dquote = true,
-                b'\'' => in_squote = true,
+                b'"' => quote = b'"',
+                b'\'' => quote = b'\'',
                 _ => {}
             }
         }
@@ -163,151 +158,6 @@ unsafe fn neon_movemask(v: uint8x16_t) -> u16 {
     let lo_sum = vaddv_u8(lo);
     let hi_sum = vaddv_u8(hi);
     (lo_sum as u16) | ((hi_sum as u16) << 8)
-}
-
-/// Create a bitmask with bits 0..=pos set. Safe for pos 0..=63.
-#[inline(always)]
-fn mask_up_to(pos: u32) -> u64 {
-    if pos >= 63 { u64::MAX } else { (1u64 << (pos + 1)) - 1 }
-}
-
-/// Create a bitmask with bits pos..=63 set. Safe for pos 0..=63.
-#[inline(always)]
-fn mask_from(pos: u32) -> u64 {
-    if pos >= 64 { 0 } else { !((1u64 << pos) - 1) }
-}
-
-/// Compute prefix-XOR using ARM PMULL (polynomial multiply).
-/// prefix_xor(x) at bit i = XOR of all bits 0..=i in x.
-/// This is equivalent to: x[0], x[0]^x[1], x[0]^x[1]^x[2], ...
-/// Computed in 1-2 instructions via carryless multiply by ALL_ONES.
-#[cfg(target_arch = "aarch64")]
-#[inline(always)]
-unsafe fn prefix_xor(mask: u64) -> u64 {
-    // PMULL: polynomial multiply long (carryless multiply)
-    // clmul(mask, 0xFFFF_FFFF_FFFF_FFFF) produces the prefix XOR.
-    // We only need the low 64 bits of the 128-bit result.
-    use std::arch::aarch64::*;
-    let result = vmull_p64(mask, u64::MAX);
-    // Extract low 64 bits from the poly128_t result
-    vgetq_lane_u64(vreinterpretq_u64_p128(result), 0)
-}
-
-/// Scalar fallback for prefix_xor (used on non-aarch64 or in tests).
-#[cfg(not(target_arch = "aarch64"))]
-#[inline(always)]
-fn prefix_xor(mask: u64) -> u64 {
-    let mut x = mask;
-    x ^= x << 1;
-    x ^= x << 2;
-    x ^= x << 4;
-    x ^= x << 8;
-    x ^= x << 16;
-    x ^= x << 32;
-    x
-}
-
-/// Apply quote masking to structural character bitmasks.
-///
-/// Uses PMULL (carryless multiply) for the fast path when only one quote type
-/// is present — computes the "inside quotes" bitmask in 1-2 instructions.
-/// Falls back to sequential bit-walk when both " and ' appear in the same chunk.
-#[inline]
-fn apply_quote_mask(
-    lt_mask: u64,
-    gt_mask: u64,
-    dq_mask: u64,
-    sq_mask: u64,
-    in_dquote: &mut bool,
-    in_squote: &mut bool,
-) -> (u64, u64) {
-    // Fast path: no quotes in this chunk and not inside quotes → no masking
-    if dq_mask == 0 && sq_mask == 0 && !*in_dquote && !*in_squote {
-        return (lt_mask, gt_mask);
-    }
-
-    // PMULL fast path: only one quote type in this chunk
-    // This covers 99%+ of real XML chunks (attributes typically use " only).
-    if sq_mask == 0 && !*in_squote {
-        // Only double quotes — use PMULL prefix-XOR
-        let quoted = unsafe { prefix_xor(dq_mask) };
-        // If we carried in a dquote state, flip the mask
-        let quoted = if *in_dquote { !quoted } else { quoted };
-        // Update carry-out: odd number of dquotes toggles state
-        *in_dquote = (dq_mask.count_ones() & 1 == 1) ^ *in_dquote;
-        return (lt_mask & !quoted, gt_mask & !quoted);
-    }
-
-    if dq_mask == 0 && !*in_dquote {
-        // Only single quotes — use PMULL prefix-XOR
-        let quoted = unsafe { prefix_xor(sq_mask) };
-        let quoted = if *in_squote { !quoted } else { quoted };
-        *in_squote = (sq_mask.count_ones() & 1 == 1) ^ *in_squote;
-        return (lt_mask & !quoted, gt_mask & !quoted);
-    }
-
-    // Slow path: both quote types present — sequential bit-walk.
-    // Rare in practice (< 1% of chunks in typical XML).
-    apply_quote_mask_slow(lt_mask, gt_mask, dq_mask, sq_mask, in_dquote, in_squote)
-}
-
-/// Sequential bit-walk fallback for mixed-quote chunks.
-fn apply_quote_mask_slow(
-    lt_mask: u64,
-    gt_mask: u64,
-    dq_mask: u64,
-    sq_mask: u64,
-    in_dquote: &mut bool,
-    in_squote: &mut bool,
-) -> (u64, u64) {
-    let mut quoted_mask: u64 = 0;
-    let mut remaining = dq_mask | sq_mask;
-
-    if *in_dquote {
-        if dq_mask != 0 {
-            let close_pos = dq_mask.trailing_zeros();
-            quoted_mask |= mask_up_to(close_pos);
-            *in_dquote = false;
-            remaining &= !mask_up_to(close_pos);
-        } else {
-            return (0, 0);
-        }
-    } else if *in_squote {
-        if sq_mask != 0 {
-            let close_pos = sq_mask.trailing_zeros();
-            quoted_mask |= mask_up_to(close_pos);
-            *in_squote = false;
-            remaining &= !mask_up_to(close_pos);
-        } else {
-            return (0, 0);
-        }
-    }
-
-    while remaining != 0 {
-        let pos = remaining.trailing_zeros();
-        remaining &= remaining - 1;
-        let byte_is_dquote = (dq_mask >> pos) & 1 == 1;
-
-        let after_mask = if pos < 63 { !((1u64 << (pos + 1)) - 1) } else { 0 };
-        let close_mask = if byte_is_dquote {
-            dq_mask & after_mask
-        } else {
-            sq_mask & after_mask
-        };
-
-        if close_mask != 0 {
-            let close_pos = close_mask.trailing_zeros();
-            let range = mask_up_to(close_pos) & mask_from(pos);
-            quoted_mask |= range;
-            remaining &= !range;
-        } else {
-            quoted_mask |= mask_from(pos);
-            if byte_is_dquote { *in_dquote = true; } else { *in_squote = true; }
-            break;
-        }
-    }
-
-    (lt_mask & !quoted_mask, gt_mask & !quoted_mask)
 }
 
 #[cfg(test)]

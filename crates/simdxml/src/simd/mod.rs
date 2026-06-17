@@ -76,6 +76,130 @@ impl<'a> Iterator for BitPositionIter<'a> {
     }
 }
 
+/// Resolve `<`/`>` positions from the raw per-chunk character masks, honoring
+/// XML quoting rules.
+///
+/// In well-formed XML a literal `<` may never appear in text content or inside
+/// an attribute value (it must be escaped as `&lt;`), so every `<` reliably
+/// starts markup. We therefore (a) always emit `<`, and (b) reset the quote
+/// state at each `<`, so quotes only suppress `>` *within* the current tag's
+/// attribute values — never across a tag boundary. This avoids the failure mode
+/// of a global quote toggle, where a single `"` or `'` in text content would
+/// flip the parity and drop every subsequent tag from the index.
+///
+/// `quote` carries the active quote byte (`0`, `b'"'`, or `b'\''`) across chunks.
+/// Only the set structural bits are walked, so this stays cheap (a handful of
+/// iterations per 64-byte chunk) while the SIMD backends do the bulk scanning.
+#[inline]
+pub(crate) fn resolve_quotes(
+    lt_mask: u64,
+    gt_mask: u64,
+    dq_mask: u64,
+    sq_mask: u64,
+    quote: &mut u8,
+) -> (u64, u64) {
+    // Fast path: no quote characters in this chunk and not currently inside a
+    // quoted value → every `<` and `>` passes through unchanged.
+    if dq_mask == 0 && sq_mask == 0 && *quote == 0 {
+        return (lt_mask, gt_mask);
+    }
+
+    let mut lt_out: u64 = 0;
+    let mut gt_out: u64 = 0;
+    let mut events = lt_mask | gt_mask | dq_mask | sq_mask;
+    while events != 0 {
+        let pos = events.trailing_zeros();
+        events &= events - 1;
+        let bit = 1u64 << pos;
+
+        if lt_mask & bit != 0 {
+            // `<` always begins markup; emit it and clear any (malformed) open quote.
+            lt_out |= bit;
+            *quote = 0;
+        } else if *quote != 0 {
+            // Inside an attribute value: only the matching quote byte closes it.
+            // A `>` here is literal and must not terminate the tag.
+            let q = *quote;
+            if (q == b'"' && dq_mask & bit != 0) || (q == b'\'' && sq_mask & bit != 0) {
+                *quote = 0;
+            }
+        } else if gt_mask & bit != 0 {
+            gt_out |= bit;
+        } else if dq_mask & bit != 0 {
+            *quote = b'"';
+        } else {
+            // sq_mask & bit != 0
+            *quote = b'\'';
+        }
+    }
+    (lt_out, gt_out)
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::resolve_quotes;
+
+    /// Build the four per-chunk character masks for up to 64 bytes, then resolve.
+    fn resolve(s: &[u8], quote: &mut u8) -> (Vec<usize>, Vec<usize>) {
+        assert!(s.len() <= 64);
+        let (mut lt, mut gt, mut dq, mut sq) = (0u64, 0u64, 0u64, 0u64);
+        for (i, &b) in s.iter().enumerate() {
+            let bit = 1u64 << i;
+            match b {
+                b'<' => lt |= bit,
+                b'>' => gt |= bit,
+                b'"' => dq |= bit,
+                b'\'' => sq |= bit,
+                _ => {}
+            }
+        }
+        let (lt_out, gt_out) = resolve_quotes(lt, gt, dq, sq, quote);
+        let bits = |m: u64| (0..64).filter(|i| m & (1 << i) != 0).collect::<Vec<_>>();
+        (bits(lt_out), bits(gt_out))
+    }
+
+    #[test]
+    fn quote_in_text_does_not_mask_following_tags() {
+        // `<a>"</a>` — the bug: the `"` would mask the `</a>`'s `<` and `>`.
+        let mut q = 0;
+        let (lt, gt) = resolve(br#"<a>"</a>"#, &mut q);
+        assert_eq!(lt, vec![0, 4]); // both '<' survive
+        assert_eq!(gt, vec![2, 7]); // both '>' survive
+        assert_eq!(q, 0);
+    }
+
+    #[test]
+    fn gt_inside_attribute_is_suppressed() {
+        let mut q = 0;
+        let (lt, gt) = resolve(br#"<a b="x>y">"#, &mut q);
+        assert_eq!(lt, vec![0]);
+        assert_eq!(gt, vec![10]); // the '>' at index 7 (inside quotes) is gone
+        assert_eq!(q, 0);
+    }
+
+    #[test]
+    fn single_quote_inside_double_is_literal() {
+        let mut q = 0;
+        let (_, gt) = resolve(br#"<a b="it's > ok">"#, &mut q);
+        // Only the final tag-closing '>' survives; the one inside the value does not.
+        assert_eq!(gt, vec![16]);
+        assert_eq!(q, 0);
+    }
+
+    #[test]
+    fn quote_state_carries_across_chunks() {
+        // An attribute value left open at a chunk boundary stays open.
+        let mut q = 0;
+        let (_, gt1) = resolve(br#"<a b="x>"#, &mut q);
+        assert_eq!(gt1, Vec::<usize>::new()); // '>' is inside the open quote
+        assert_eq!(q, b'"');
+        // Next chunk: the value closes, then the real tag end.
+        let (_, gt2) = resolve(br#"y">"#, &mut q);
+        assert_eq!(gt2, vec![2]);
+        assert_eq!(q, 0);
+    }
+}
+
 /// Build structural index using the best available SIMD on this platform.
 pub fn classify_structural(input: &[u8]) -> StructuralIndex {
     #[cfg(target_arch = "aarch64")]
